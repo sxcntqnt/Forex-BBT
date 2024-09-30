@@ -41,4 +41,11 @@ An advanced forex trading bot that incorporates risk management techniques, erro
 
    Remember to replace your_api_token_here in the .env file with your actual Deriv API token.
 
-   GNU GENERAL PUBLIC LICENSE
+   Disclaimer
+This bot is for educational purposes only. Trading forex carries a high level of risk and may not be suitable for all investors. Please ensure you fully understand the risks involved and seek independent advice if necessary.
+
+Contributing
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+License
+This project is licensed under the MIT License.
