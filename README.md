@@ -23,14 +23,16 @@ An advanced forex trading bot that incorporates risk management techniques, erro
    instructions for your operating system.
 
 8. Create a .env file in the project directory and add your Deriv API token:
-   DERIV_API_TOKEN=your_api_token_here
 
-9. Run the bot:
+
+9. DERIV_API_TOKEN=your_api_token_here
+
+10. Run the bot:
    python main.py
 
    The bot will start running, and you can access the web interface at http://localhost:8080.
 
-10. To interact with the bot through the web interface, you can use curl commands or any HTTP client:
+11. To interact with the bot through the web interface, you can use curl commands or any HTTP client:
 
    Get bot status: curl http://localhost:8080/status
    Start the bot: curl -X POST http://localhost:8080/start
