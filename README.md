@@ -1,40 +1,42 @@
 # Forex_Bot
 An advanced forex trading bot that incorporates risk management techniques, error handling, continuous monitoring, consideration of transaction costs, trailing stops, slippage handling, and careful consideration of factors like market data latency and order execution quality using api.deriv.com.
-Ensure you have Python 3.7 or higher installed on your system.
+1. Ensure you have Python 3.7 or higher installed on your system.
 
-Create a new directory for your project and navigate to it in the terminal:
+2. Create a new directory for your project and navigate to it in the terminal:
 
-mkdir advanced_forex_bot
+3. mkdir advanced_forex_bot
 
-cd advanced_forex_bot
+4. cd advanced_forex_bot
 
-Create a virtual environment:
-python -m venv venv
+5. Create a virtual environment:
+   python -m venv venv
 
-Activate the virtual environment:
+6. Activate the virtual environment:
 
-On Windows: venv\Scripts\activate
-On macOS and Linux: source venv/bin/activate
-Install the required packages:
+   On Windows: venv\Scripts\activate
+   On macOS and Linux: source venv/bin/activate
+7. Install the required packages:
 
-pip install deriv-api python-dotenv numpy pandas scikit-learn TA-Lib aiohttp
+   pip install deriv-api python-dotenv numpy pandas scikit-learn TA-Lib aiohttp
 
-Note: Installing TA-Lib might be tricky on some systems. You may need to install it separately following the instructions for your operating system.
+   Note: Installing TA-Lib might be tricky on some systems. You may need to install it separately following the 
+   instructions for your operating system.
 
-Create a .env file in the project directory and add your Deriv API token:
-DERIV_API_TOKEN=your_api_token_here
+8. Create a .env file in the project directory and add your Deriv API token:
+   DERIV_API_TOKEN=your_api_token_here
 
-Run the bot:
-python main.py
+9. Run the bot:
+   python main.py
 
-The bot will start running, and you can access the web interface at http://localhost:8080.
+   The bot will start running, and you can access the web interface at http://localhost:8080.
 
-To interact with the bot through the web interface, you can use curl commands or any HTTP client:
+10. To interact with the bot through the web interface, you can use curl commands or any HTTP client:
 
-Get bot status: curl http://localhost:8080/status
-Start the bot: curl -X POST http://localhost:8080/start
-Stop the bot: curl -X POST http://localhost:8080/stop
-Run backtest: curl -X POST http://localhost:8080/backtest
+   Get bot status: curl http://localhost:8080/status
+   Start the bot: curl -X POST http://localhost:8080/start
+   Stop the bot: curl -X POST http://localhost:8080/stop
+   Run backtest: curl -X POST http://localhost:8080/backtest
 
-Remember to replace your_api_token_here in the .env file with your actual Deriv API token.
+   Remember to replace your_api_token_here in the .env file with your actual Deriv API token.
 
+   GNU GENERAL PUBLIC LICENSE
