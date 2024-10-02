@@ -1,15 +1,17 @@
 import os, time, sys
 from dotenv import load_dotenv
 
-# Check for API_TOKEN
-if os.getenv("APP_ID") is None or len(os.getenv("APP_ID")) == 0:
-    print("APP_ID environment variable is not set")
-    time.sleep(2)
-    sys.exit('Exiting...')
-
 class Config:
     def __init__(self):
-        load_dotenv()
+        load_dotenv()  # Load environment variables from .env file
+        
+        # Check for APP_ID after loading environment variables
+        if os.getenv("APP_ID") is None or len(os.getenv("APP_ID")) == 0:
+            print("APP_ID environment variable is not set")
+            time.sleep(2)
+            sys.exit('Exiting...')
+
+        # Load other configuration variables
         self.API_TOKEN = os.getenv('DERIV_API_TOKEN')
         self.EndPoint = f'wss://frontend.binaryws.com/websockets/v3?l=EN&app_id={os.getenv("APP_ID")}'
         self.SYMBOLS = ['frxEURUSD', 'frxGBPUSD', 'frxUSDJPY']
