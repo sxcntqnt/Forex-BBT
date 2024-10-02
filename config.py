@@ -1,5 +1,11 @@
-import os
+import os, time, sys
 from dotenv import load_dotenv
+
+# Check for API_TOKEN
+if os.getenv("APP_ID") is None or len(os.getenv("APP_ID")) == 0:
+    print("APP_ID environment variable is not set")
+    time.sleep(2)
+    sys.exit('Exiting...')
 
 class Config:
     def __init__(self):
