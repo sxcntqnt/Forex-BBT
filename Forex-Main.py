@@ -14,11 +14,16 @@ async def main():
 
     connection = await websockets.connect(config.EndPoint)
     bot = ForexBot(config, connection)
+
     
     web_task = asyncio.create_task(start_web_interface(bot))
     bot_task = asyncio.create_task(bot.run())
     
-    await asyncio.gather(web_task, bot_task)
+    try:
+        await asyncio.gather(web_task, bot_task)
+    except KeyboardInterrupt:
+        print("Shutting down gracefully...")
+    # Perform any cleanup here if necessary
 
 if __name__ == "__main__":
     asyncio.run(main())
