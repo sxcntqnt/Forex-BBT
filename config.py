@@ -5,8 +5,7 @@ class Config:
     def __init__(self):
         load_dotenv()
         self.API_TOKEN = os.getenv('DERIV_API_TOKEN')
-        self.EndPoint = 'wss://api.deriv.com'
-        self.APP_ID = ''
+        self.EndPoint = f'wss://frontend.binaryws.com/websockets/v3?l=EN&app_id={os.getenv("APP_ID")}'
         self.SYMBOLS = ['frxEURUSD', 'frxGBPUSD', 'frxUSDJPY']
         self.TIMEFRAME = '5m'
         self.RISK_PERCENTAGE = 0.01

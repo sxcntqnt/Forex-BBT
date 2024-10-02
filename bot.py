@@ -13,7 +13,7 @@ from backtester import Backtester
 class ForexBot:
     def __init__(self, config, connection):
         self.config = config
-        self.api = DerivAPI(connection=connection, app_id= config.APP_ID)
+        self.api = DerivAPI(connection=connection)
         self.strategy_manager = StrategyManager()
         self.risk_manager = RiskManager(config)
         self.monitor = Monitor(config)
@@ -26,7 +26,7 @@ class ForexBot:
 
     async def run(self):
         self.running = True
-        response = await api.ping({'ping': 1})
+        response = await self.api.ping({'ping': 1})
         print(response)
 
         await self.api.authorize(self.config.API_TOKEN)
