@@ -9,25 +9,26 @@ An advanced forex trading bot that incorporates risk management techniques, erro
 4. cd advanced_forex_bot
 
 5. Create a virtual environment:
-   python -m venv venv
+   python -m venv stonks
 
 6. Activate the virtual environment:
 
    On Windows: venv\Scripts\activate
    On macOS and Linux: source venv/bin/activate
-7. Install the required packages:
+  
+8. Install the required packages:
 
    pip install deriv-api python-dotenv numpy pandas scikit-learn TA-Lib aiohttp
 
    Note: Installing TA-Lib might be tricky on some systems. You may need to install it separately following the 
    instructions for your operating system.
 
-8. Create a .env file in the project directory and add your Deriv API token:
+9. Create a .env file in the project directory and add your Deriv API token:
 
 
-9. DERIV_API_TOKEN=your_api_token_here
+10. DERIV_API_TOKEN=your_api_token_here
 
-10. Run the bot:
+11. Run the bot:
    python main.py
 
    The bot will start running, and you can access the web interface at http://localhost:8080.
