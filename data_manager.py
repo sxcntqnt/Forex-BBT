@@ -1,22 +1,17 @@
 import pandas as pd
-
-from typing import List
-from typing import Dict
-from typing import Union
-
+from typing import List, Dict, Union
 from pandas.core.groupby import DataFrameGroupBy
 from pandas.core.window import RollingGroupby
-from pandas.core.window import Window
 
-class DataManager():
-
-    def __init__(self, data: List[Dict]) -> None:
-        """Initalizes the Stock Data Frame Object.
+class DataManager:
+    def __init__(self, data: List[Dict], symbols: List[str]) -> None:
+        """Initializes the Stock Data Frame Object.
 
         Arguments:
         ----
         data {List[Dict]} -- The data to convert to a frame. Normally, this is 
             returned from the historical prices endpoint.
+        symbols {List[str]} -- List of symbols to track.
         """
 
         self._data = data
@@ -27,7 +22,7 @@ class DataManager():
         self.data = {symbol: pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close']) for symbol in symbols}
         self.max_data_points = 1000
 
-    def update(self, symbol, tick):
+    def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
         new_data = pd.DataFrame({
             'timestamp': [tick['epoch']],
             'open': [tick['quote']],
@@ -37,12 +32,11 @@ class DataManager():
         })
         self.data[symbol] = pd.concat([self.data[symbol], new_data]).tail(self.max_data_points)
 
-    def get_close_prices(self, symbol):
+    def get_close_prices(self, symbol: str) -> List[float]:
         return self.data[symbol]['close'].tolist()
 
-    def get_ohlc_data(self, symbol):
+    def get_ohlc_data(self, symbol: str) -> pd.DataFrame:
         return self.data[symbol]
-
 
     @property
     def frame(self) -> pd.DataFrame:
@@ -58,24 +52,16 @@ class DataManager():
     def symbol_groups(self) -> DataFrameGroupBy:
         """Returns the Groups in the StockFrame.
 
-        Overview:
-        ----
-        Often we will want to apply operations to a each symbol. The
-        `symbols_groups` property will return the dataframe grouped by
-        each symbol.
-
         Returns:
         ----
         {DataFrameGroupBy} -- A `pandas.core.groupby.GroupBy` object with each symbol.
         """
-
         # Group by Symbol.
-        self._symbol_groups: DataFrameGroupBy = self._frame.groupby(
+        self._symbol_groups = self._frame.groupby(
             by='symbol',
             as_index=False,
             sort=True
         )
-
         return self._symbol_groups
 
     def symbol_rolling_groups(self, size: int) -> RollingGroupby:
@@ -89,15 +75,11 @@ class DataManager():
         ----
         {RollingGroupby} -- A `pandas.core.window.RollingGroupby` object.
         """
-
-        # If we don't a symbols group, then create it.
-        if not self._symbol_groups:
+        # Ensure symbol groups exist.
+        if self._symbol_groups is None:
             self.symbol_groups
 
-        self._symbol_rolling_groups: RollingGroupby = self._symbol_groups.rolling(
-            size
-        )
-
+        self._symbol_rolling_groups = self._symbol_groups.rolling(size)
         return self._symbol_rolling_groups
 
     def create_frame(self) -> pd.DataFrame:
@@ -107,8 +89,6 @@ class DataManager():
         ----
         {pd.DataFrame} -- A pandas dataframe.
         """
-
-        # Make a data frame.
         price_df = pd.DataFrame(data=self._data)
         price_df = self._parse_datetime_column(price_df=price_df)
         price_df = self._set_multi_index(price_df=price_df)
@@ -127,13 +107,11 @@ class DataManager():
         ----
         {pd.DataFrame} -- A pandas dataframe.
         """
-
         price_df['datetime'] = pd.to_datetime(
             price_df['datetime'],
             unit='ms', 
             origin='unix'
         )
-
         return price_df
 
     def _set_multi_index(self, price_df: pd.DataFrame) -> pd.DataFrame:
@@ -147,9 +125,7 @@ class DataManager():
         ----
         pd.DataFrame -- A pandas dataframe.
         """
-
         price_df = price_df.set_index(keys=['symbol', 'datetime'])
-
         return price_df
 
     def add_rows(self, data: Dict) -> None:
@@ -158,30 +134,10 @@ class DataManager():
         Arguments:
         ----
         data {Dict} -- A list of quotes.
-
-        Usage:
-        ----
-            >>> # Create a StockFrame object.
-            >>> stock_frame = trading_robot.create_stock_frame(
-                data=historical_prices['aggregated']
-            )
-            >>> fake_data = {
-                "datetime": 1586390396750,
-                "symbol": "MSFT",
-                "close": 165.7,
-                "open": 165.67,
-                "high": 166.67,
-                "low": 163.5,
-                "volume": 48318234
-            }
-            >>> # Add to the Stock Frame.
-            >>> stock_frame.add_rows(data=fake_data)
         """
-
         column_names = ['open', 'close', 'high', 'low', 'volume']
 
         for quote in data:
-
             # Parse the Timestamp.
             time_stamp = pd.to_datetime(
                 quote['datetime'],
@@ -202,22 +158,14 @@ class DataManager():
             ]
 
             # Create a new row.
-            new_row = pd.Series(data=row_values)
+            new_row = pd.Series(data=row_values, index=column_names)
 
-            # Add the row.
-            self.frame.loc[row_id, column_names] = new_row.values
-
-            self.frame.sort_index(inplace=True)
+            # Add the row and sort the frame index.
+            self._frame.loc[row_id] = new_row.values
+            self._frame.sort_index(inplace=True)
 
     def do_indicator_exist(self, column_names: List[str]) -> bool:
         """Checks to see if the indicator columns specified exist.
-
-        Overview:
-        ----
-        The user can add multiple indicator columns to their StockFrame object
-        and in some cases we will need to modify those columns before making trades.
-        In those situations, this method, will help us check if those columns exist
-        before proceeding on in the code.
 
         Arguments:
         ----
@@ -231,176 +179,122 @@ class DataManager():
         ----
         bool -- `True` if all the columns exist.
         """
-
-        if set(column_names).issubset(self._frame.columns):
+        missing_columns = set(column_names).difference(self._frame.columns)
+        if not missing_columns:
             return True
         else:
-            raise KeyError("The following indicator columns are missing from the StockFrame: {missing_columns}".format(
-                missing_columns=set(column_names).difference(
-                    self._frame.columns)
-            ))
+            raise KeyError(f"The following indicator columns are missing from the StockFrame: {missing_columns}")
 
-    def _check_signals(self, indicators: dict, indciators_comp_key: List[str], indicators_key: List[str]) -> Union[pd.DataFrame, None]:
+    def _check_signals(self, indicators: Dict, indicators_comp_key: List[str], indicators_key: List[str]) -> Union[pd.DataFrame, None]:
         """Returns the last row of the StockFrame if conditions are met.
-
-        Overview:
-        ----
-        Before a trade is executed, we must check to make sure if the
-        conditions that warrant a `buy` or `sell` signal are met. This
-        method will take last row for each symbol in the StockFrame and
-        compare the indicator column values with the conditions specified
-        by the user.
-
-        If the conditions are met the row will be returned back to the user.
 
         Arguments:
         ----
-        indicators {dict} -- A dictionary containing all the indicators to be checked
-            along with their buy and sell criteria.
-
-        indicators_comp_key List[str] -- A list of the indicators where we are comparing
-            one indicator to another indicator.
-
-        indicators_key List[str] -- A list of the indicators where we are comparing
-            one indicator to a numerical value.
+        indicators {dict} -- A dictionary containing all the indicators to be checked.
+        indicators_comp_key {List[str]} -- Indicators where we compare one indicator to another.
+        indicators_key {List[str]} -- Indicators where we compare one indicator to a numerical value.
 
         Returns:
         ----
-        {Union[pd.DataFrame, None]} -- If signals are generated then, a pandas.DataFrame object
-            will be returned. If no signals are found then nothing will be returned.
+        {Union[pd.DataFrame, None]} -- If signals are generated, a pandas DataFrame is returned; else None.
         """
-
         # Grab the last rows.
-        last_rows = self._symbol_groups.tail(1)
+        last_rows = self.symbol_groups.tail(1)
 
         # Define a list of conditions.
         conditions = {}
 
-        # Check to see if all the columns exist.
+        # Check if all columns exist.
         if self.do_indicator_exist(column_names=indicators_key):
-
             for indicator in indicators_key:
-
                 column = last_rows[indicator]
 
-                # Grab the Buy & Sell Condition.
+                # Grab Buy & Sell Conditions.
                 buy_condition_target = indicators[indicator]['buy']
                 sell_condition_target = indicators[indicator]['sell']
 
                 buy_condition_operator = indicators[indicator]['buy_operator']
                 sell_condition_operator = indicators[indicator]['sell_operator']
 
-                condition_1: pd.Series = buy_condition_operator(
-                    column, buy_condition_target
-                )
-                condition_2: pd.Series = sell_condition_operator(
-                    column, sell_condition_target
-                )
+                condition_1 = buy_condition_operator(column, buy_condition_target)
+                condition_2 = sell_condition_operator(column, sell_condition_target)
 
-                condition_1 = condition_1.where(lambda x: x == True).dropna()
-                condition_2 = condition_2.where(lambda x: x == True).dropna()
+                conditions['buys'] = condition_1.where(lambda x: x).dropna()
+                conditions['sells'] = condition_2.where(lambda x: x).dropna()
 
-                conditions['buys'] = condition_1
-                conditions['sells'] = condition_2
-        
         # Store the indicators in a list.
         check_indicators = []
         
-        # Split the name so we can check if the indicator exist.
-        for indicator in indciators_comp_key:
-            parts = indicator.split('_comp_')
-            check_indicators += parts
+        # Split names to check if indicators exist.
+        for indicator in indicators_comp_key:
+            check_indicators.extend(indicator.split('_comp_'))
 
         if self.do_indicator_exist(column_names=check_indicators):
-
-            for indicator in indciators_comp_key:
-                
-                # Split the indicators.
+            for indicator in indicators_comp_key:
                 parts = indicator.split('_comp_')
-
-                # Grab the indicators that need to be compared.
                 indicator_1 = last_rows[parts[0]]
                 indicator_2 = last_rows[parts[1]]
 
-                # If we have a buy operator, grab it.
-                if indicators[indicator]['buy_operator']:
-
-                    # Grab the Buy Operator.
+                # If buy operator exists.
+                if indicators[indicator].get('buy_operator'):
                     buy_condition_operator = indicators[indicator]['buy_operator']
+                    condition_1 = buy_condition_operator(indicator_1, indicator_2)
+                    conditions['buys'] = condition_1.where(lambda x: x).dropna()
 
-                    # Grab the Condition.
-                    condition_1: pd.Series = buy_condition_operator(
-                        indicator_1, indicator_2
-                    )
-
-                    # Keep the one's that aren't null.
-                    condition_1 = condition_1.where(lambda x: x == True).dropna()
-
-                    # Add it as a buy signal.
-                    conditions['buys'] = condition_1
-
-                # If we have a sell operator, grab it.
-                if indicators[indicator]['sell_operator']:
-
-                    # Grab the Sell Operator.
+                # If sell operator exists.
+                if indicators[indicator].get('sell_operator'):
                     sell_condition_operator = indicators[indicator]['sell_operator']
+                    condition_2 = sell_condition_operator(indicator_1, indicator_2)
+                    conditions['sells'] = condition_2.where(lambda x: x).dropna()
 
-                    # Store it in a Pd.Series.
-                    condition_2: pd.Series = sell_condition_operator(
-                        indicator_1, indicator_2
-                    )
-
-                    # keep the one's that aren't null.
-                    condition_2 = condition_2.where(lambda x: x == True).dropna()
-
-                    # Add it as a sell signal.
-                    conditions['sells'] = condition_2
-
-        return conditions
-
-    def grab_current_bar(self, symbol: str) -> pd.Series:
-        """Grabs the current trading bar.
-
-        ### Parameters
-        ----------
-        symbol : str
-            The symbol to grab the latest
-            bar for.
-
-        ### Returns
-        -------
-        pd.Series
-            A candle bar, represented as a
-            pandas series object.
-        """        
-
-        # Filter the Stock Frame.
-        bars_filtered = self._frame.filter(like=symbol, axis=0)
-        bars = bars_filtered.tail(1)
-
-        return bars
+        return pd.DataFrame(conditions) if conditions else None
 
     def grab_n_bars_ago(self, symbol: str, n: int) -> pd.Series:
-        """Grabs the current trading bar.
+        """Grabs the trading bar `n` bars ago.
 
-        ### Parameters
-        ----------
-        symbol : str
-            The symbol to grab the latest
-            bar for.
+        Arguments:
+        ----
+        symbol : str -- The symbol to grab the bar for.
+        n : int -- The number of bars to look back.
 
-        n : str
-            The number of bars to look back.
-
-        ### Returns
-        -------
-        pd.Series
-            A candle bar, represented as a
-            pandas series object.
-        """        
-
-        # Filter the Stock Frame.
+        Returns:
+        ----
+        pd.Series -- A candle bar represented as a pandas series object.
+        """
         bars_filtered = self._frame.filter(like=symbol, axis=0)
-        bars = bars_filtered.iloc[-n]
+        return bars_filtered.iloc[-n]
 
-        return bars
+    def calculate_indicators(self, symbol: str, indicators: Dict[str, Dict]) -> None:
+        """Calculates and adds specified indicators to the stock data frame.
+
+        Arguments:
+        ----
+        symbol : str -- The symbol for which to calculate indicators.
+        indicators : Dict[str, Dict] -- A dictionary of indicators and their parameters.
+        """
+        df = self.get_ohlc_data(symbol)
+        for indicator, params in indicators.items():
+            if indicator == 'SMA':
+                window = params.get('window', 14)
+                df[f'{indicator}_{window}'] = df['close'].rolling(window=window).mean()
+            elif indicator == 'EMA':
+                span = params.get('span', 14)
+                df[f'{indicator}_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
+            # Add more indicators as needed
+        self.data[symbol] = df
+
+    def reset_data(self) -> None:
+        """Resets the internal data structures, clearing all stored information."""
+        self.data = {symbol: pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close']) for symbol in self.symbols}
+        self._frame = self.create_frame()
+        self._symbol_groups = None
+        self._symbol_rolling_groups = None
+
+    def get_all_symbols_data(self) -> Dict[str, pd.DataFrame]:
+        """Retrieves OHLC data for all tracked symbols.
+
+        Returns:
+        ----
+        Dict[str, pd.DataFrame] -- A dictionary of DataFrames indexed by symbol.
+        """
+        return self.data
