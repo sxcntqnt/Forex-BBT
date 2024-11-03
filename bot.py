@@ -17,7 +17,7 @@ class ForexBot:
         self.strategy_manager = StrategyManager()
         self.risk_manager = RiskManager(config)
         self.monitor = Monitor(config)
-        self.data_manager = DataManager(config.SYMBOLS)
+        self.data_manager : DataManager =None 
         self.portfolio_manager = PortfolioManager(config)
         self.performance_monitor = PerformanceMonitor()
         self.backtester = Backtester(config, self.strategy_manager)

@@ -4,25 +4,30 @@ from pandas.core.groupby import DataFrameGroupBy
 from pandas.core.window import RollingGroupby
 
 class DataManager:
-    def __init__(self, data: List[Dict], symbols: List[str]) -> None:
-        """Initializes the Stock Data Frame Object.
+    def __init__(self, config, data: List[Dict], symbols: List[str]) -> None:
+        """Initializes the Stock Data Manager.
 
-        Arguments:
-        ----
-        data {List[Dict]} -- The data to convert to a frame. Normally, this is 
-            returned from the historical prices endpoint.
-        symbols {List[str]} -- List of symbols to track.
+        Args:
+            config: Configuration object (not used in this snippet).
+            data (List[Dict]): The data to convert to a DataFrame. Normally,
+                this is returned from the historical prices endpoint.
+            symbols (List[str]): List of symbols to track.
         """
-
         self._data = data
         self._frame: pd.DataFrame = self.create_frame()
         self._symbol_groups = None
         self._symbol_rolling_groups = None
-        self.symbols = symbols
-        self.data = {symbol: pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close']) for symbol in symbols}
+        self.symbols = {symbol: pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close']) for symbol in symbols}
         self.max_data_points = 1000
 
     def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
+        """Updates the DataFrame for the specified symbol with new tick data.
+
+        Args:
+            symbol (str): The stock symbol to update.
+            tick (Dict[str, Union[int, float]]): New tick data containing
+                'epoch' for timestamp and 'quote' for price.
+        """
         new_data = pd.DataFrame({
             'timestamp': [tick['epoch']],
             'open': [tick['quote']],
@@ -30,7 +35,12 @@ class DataManager:
             'low': [tick['quote']],
             'close': [tick['quote']]
         })
-        self.data[symbol] = pd.concat([self.data[symbol], new_data]).tail(self.max_data_points)
+
+        # Update the DataFrame for the given symbol
+        if symbol in self.symbols:
+            self.symbols[symbol] = pd.concat([self.symbols[symbol], new_data]).tail(self.max_data_points)
+        else:
+            print(f"Symbol {symbol} not found in managed symbols.")
 
     def get_close_prices(self, symbol: str) -> List[float]:
         return self.data[symbol]['close'].tolist()
