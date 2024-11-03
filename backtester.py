@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import List
 from typing import Dict
 
-from td.client import TDClient
 
 
 class Backtester:

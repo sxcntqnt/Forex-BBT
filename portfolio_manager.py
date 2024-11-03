@@ -7,7 +7,7 @@ from typing import Optional
 
 
 from data_manager import DataManager
-from td.client import TDClient
+from deriv_api import DerivAPI
 
 
 
@@ -31,8 +31,8 @@ class PortfolioManager():
         self._historical_prices = []
 
         self._td_client: TDClient = None
-        self._stock_frame: StockFrame = None
-        self._stock_frame_daily: StockFrame = None
+        self._stock_frame: DataManager = None
+        self._stock_frame_daily: DataManager = None
 
 
         self.config = config
@@ -597,55 +597,53 @@ class PortfolioManager():
         self._historical_prices = historical_prices
 
     @property
-    def stock_frame(self) -> StockFrame:
-        """Gets the StockFrame object for the Portfolio
+    def stock_frame(self) -> DataManager:
+        """Gets the DataManager object for the Portfolio
 
         Returns:
         ----
-        {StockFrame} -- A StockFrame object with symbol groups, and rolling windows.
+        {DataManager} -- A DataManager object with symbol groups, and rolling windows.
         """
 
         return self._stock_frame
 
     @stock_frame.setter
-    def stock_frame(self, stock_frame: StockFrame) -> None:
-        """Sets the StockFrame object for the Portfolio
+    def stock_frame(self, stock_frame: DataManager) -> None:
+        """Sets the DataManager object for the Portfolio
 
         Arguments:
         ----
-        stock_frame {StockFrame} -- A StockFrame object with symbol groups, and rolling windows.
+        stock_frame {DataManager} -- A DataManager object with symbol groups, and rolling windows.
         """
 
         self._stock_frame = stock_frame
 
     @property
-    def td_client(self) -> TDClient:
-        """Gets the TDClient object for the Portfolio
+    def deriv_client(self) -> DerivAPI:
+        """Gets the DerivAPIClient object for the Portfolio.
 
         Returns:
         ----
-        {TDClient} -- An authenticated session with the TD API.
+        DerivAPIClient -- An authenticated session with the Deriv API.
         """
+        return self.api
 
-        return self._td_client
-
-    @td_client.setter
-    def td_client(self, td_client: TDClient) -> None:
-        """Sets the TDClient object for the Portfolio
+    @deriv_client.setter
+    def deriv_client(self, api_client: DerivAPI) -> None:
+        """Sets the DerivAPIClient object for the Portfolio.
 
         Arguments:
         ----
-        td_client {TDClient} -- An authenticated session with the TD API.
+        api_client {DerivAPIClient} -- An authenticated session with the Deriv API.
         """
+        self.api = api_client
 
-        self._td_client: TDClient = td_client
-
-    def _grab_daily_historical_prices(self) -> StockFrame:
+    def _grab_daily_historical_prices(self) -> DataManager:
         """Grabs the daily historical prices for each position.
 
         Returns:
         ----
-        {StockFrame} -- A StockFrame object with data organized, grouped, and sorted.
+        {DataManager} -- A DataManager object with data organized, grouped, and sorted.
         """
 
         new_prices = []
@@ -676,8 +674,8 @@ class PortfolioManager():
                 new_price_mini_dict['datetime'] = candle['datetime']
                 new_prices.append(new_price_mini_dict)
 
-        # Create and set the StockFrame
-        self._stock_frame_daily = StockFrame(data=new_prices)
+        # Create and set the DataManager
+        self._stock_frame_daily = DataManager(data=new_prices)
         self._stock_frame_daily.create_frame()
 
         return self._stock_frame_daily

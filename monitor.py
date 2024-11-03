@@ -1,6 +1,5 @@
 from backtester import Backtester
 
-from td.client import TDClient
 
 class Monitor:
     def __init__(self, config, trade_obj: Backtester) -> None:
