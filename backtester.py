@@ -1,12 +1,16 @@
 import pandas as pd
+from datetime import datetime
+import os
 import numpy as np
 from deriv_api import DerivAPI
 
 class Backtester:
-    def __init__(self, config, strategy_manager):
+    def __init__(self, config, api, data_manager,  strategy_manager):
         self.config = config
+        self.api = api
         self.strategy_manager = strategy_manager
-        self.api = DerivAPI(app_id=1089)
+        self.data_manager = data_manager  # Make sure to pass the DataManager instance
+
 
     async def run(self):
         results = {}
@@ -16,12 +20,16 @@ class Backtester:
         return results
 
     async def fetch_historical_data(self, symbol):
+        # Convert date strings to timestamps
+        start_timestamp = int(datetime.strptime(self.config.BACKTEST_START_DATE, '%Y-%m-%d').timestamp())
+        end_timestamp = int(datetime.strptime(self.config.BACKTEST_END_DATE, '%Y-%m-%d').timestamp())
+
         candles = await self.api.ticks_history({
             "ticks_history": symbol,
             "adjust_start_time": 1,
             "count": 5000,
-            "end": self.config.BACKTEST_END_DATE,
-            "start": self.config.BACKTEST_START_DATE,
+            "end": end_timestamp,
+            "start": start_timestamp,
             "style": "candles"
         })
         return pd.DataFrame(candles['candles'])
@@ -31,7 +39,7 @@ class Backtester:
         trades = []
 
         for i in range(len(data)):
-            if self.strategy_manager.should_enter_trade(symbol, data[:i+1]):
+            if self.strategy_manager.should_enter_trade(symbol, self.data_manager):
                 entry_price = data.iloc[i]['close']
                 stop_loss = entry_price - (self.config.STOP_LOSS_PIPS / 10000)
                 take_profit = entry_price + (self.config.TAKE_PROFIT_PIPS / 10000)

@@ -14,7 +14,6 @@ async def main():
 
     connection = await websockets.connect(config.EndPoint)
     bot = ForexBot(config, connection)
-
     
     web_task = asyncio.create_task(start_web_interface(bot))
     bot_task = asyncio.create_task(bot.run())
