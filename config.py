@@ -23,4 +23,3 @@ class Config:
         self.TRAILING_STOP_PIPS = 15
         self.BACKTEST_START_DATE = '2023-01-01'
         self.BACKTEST_END_DATE = '2023-06-30'
-
