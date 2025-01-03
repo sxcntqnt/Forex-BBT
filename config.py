@@ -1,7 +1,6 @@
 import os, time, sys
 from dotenv import load_dotenv
 
-
 class Config:
     def __init__(self):
         load_dotenv()  # Load environment variables from .env file
@@ -15,7 +14,7 @@ class Config:
         # Load other configuration variables
         self.API_TOKEN = os.getenv('DERIV_API_TOKEN')
         self.EndPoint = f'wss://frontend.binaryws.com/websockets/v3?l=EN&app_id={os.getenv("APP_ID")}'
-        self.SYMBOLS = ['frxEURUSD', 'frxGBPUSD', 'frxUSDJPY']
+        self.SYMBOLS = ['frxEURUSD', 'frxGBPUSD', 'frxUSDJPY', 'frxAUDUSD']
         self.TIMEFRAME = '5m'
         self.RISK_PERCENTAGE = 0.01
         self.MAX_TRADES_PER_SYMBOL = 2
@@ -24,4 +23,3 @@ class Config:
         self.TRAILING_STOP_PIPS = 15
         self.BACKTEST_START_DATE = '2023-01-01'
         self.BACKTEST_END_DATE = '2023-06-30'
-
