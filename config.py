@@ -13,7 +13,7 @@ class Config:
 
         # Load other configuration variables
         self.API_TOKEN = os.getenv('DERIV_API_TOKEN')
-        self.EndPoint = f'wss://frontend.binaryws.com/websockets/v3?l=EN&app_id={os.getenv("APP_ID")}'
+        self.EndPoint = f'wss://ws.derivws.com/websockets/v3?app_id={os.getenv("APP_ID")}'
         self.SYMBOLS = ['frxEURUSD', 'frxGBPUSD', 'frxUSDJPY', 'frxAUDUSD']
         self.TIMEFRAME = '5m'
         self.RISK_PERCENTAGE = 0.01
