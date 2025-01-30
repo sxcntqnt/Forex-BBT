@@ -14,7 +14,7 @@ class Config:
         # Load other configuration variables
         self.API_TOKEN = os.getenv('DERIV_API_TOKEN')
         self.EndPoint = f'wss://ws.derivws.com/websockets/v3?app_id={os.getenv("APP_ID")}'
-        self.SYMBOLS = ['frxEURUSD', 'frxGBPUSD', 'frxUSDJPY', 'frxAUDUSD']
+        self.SYMBOLS = ['frxAUDCAD', 'frxAUDCHF', 'frxAUDJPY', 'frxAUDNZD', 'frxAUDUSD', 'frxEURAUD', 'frxEURCAD', 'frxEURCHF', 'frxEURGBP', 'frxEURJPY', 'frxEURNZD', 'frxEURUSD', 'frxGBPAUD', 'frxGBPCAD', 'frxGBPCHF', 'frxGBPJPY', 'frxGBPUSD', 'frxNZDUSD', 'frxUSDCAD', 'frxUSDCHF', 'frxUSDJPY', 'frxUSDMXN', 'frxUSDNOK', 'frxUSDPLN', 'frxUSDSEK', 'frxXAGUSD', 'frxXAUUSD', 'frxXPDUSD', 'frxXPTUSD']
         self.TIMEFRAME = '5m'
         self.RISK_PERCENTAGE = 0.01
         self.MAX_TRADES_PER_SYMBOL = 2
