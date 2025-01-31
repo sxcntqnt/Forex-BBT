@@ -40,7 +40,7 @@ class StrategyManager:
         self._price_groups = price_dataframe.symbol_groups
         self._current_indicators = {}
         self._indicator_signals = {}
-        self._frame = self._stock_frame.frame
+        self._frame = self._stock_frame._frame
 
         self._indicators_comp_key = []
         self._indicators_key = []

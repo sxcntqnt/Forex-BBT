@@ -16,7 +16,6 @@ reactivex==4.0.4
 scikit-learn==1.5.2
 scipy==1.14.1
 six==1.16.0
-TA-Lib==0.4.32
 threadpoolctl==3.5.0
 typing_extensions==4.12.2
 tzdata==2024.2

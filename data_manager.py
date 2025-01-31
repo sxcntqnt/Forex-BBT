@@ -1,4 +1,7 @@
 import pandas as pd
+from datetime import datetime
+from datetime import timezone
+from datetime import timedelta
 from typing import List, Dict, Union
 from pandas.core.groupby import DataFrameGroupBy
 from pandas.core.window import RollingGroupby
@@ -14,11 +17,32 @@ class DataManager:
             symbols (List[str]): List of symbols to track.
         """
         self._data = data
-        self._frame: pd.DataFrame = self.create_frame()
-        self._symbol_groups = None
-        self._symbol_rolling_groups = None
-        self.symbols = {symbol: pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close']) for symbol in symbols}
+        self._frame: pd.DataFrame = self.create_frame()  # Create the DataFrame
+        self._symbol_groups: DataFrameGroupBy = None
+        self._symbol_rolling_groups: RollingGroupby = None
+        # Initialize symbols with empty DataFrames
+        self.symbols = {symbol: pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'bid', 'ask', 'quote']) for symbol in symbols}
         self.max_data_points = 1000
+
+    def create_frame(self) -> pd.DataFrame:
+        """Creates a DataFrame from the initial data."""
+        if not self._data:  # If there's no data, return an empty DataFrame
+            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'bid', 'ask', 'quote'])
+
+        price_df = pd.DataFrame(data=self._data)
+        price_df = self._parse_datetime_column(price_df=price_df)
+        price_df = self._set_multi_index(price_df=price_df)
+
+        return price_df
+
+    def _parse_datetime_column(self, price_df: pd.DataFrame) -> pd.DataFrame:
+        """Parses the datetime column passed through."""
+        price_df['datetime'] = pd.to_datetime(
+            price_df['epoch'],
+            unit='s',
+            origin='unix'
+        )
+        return price_df
 
     def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
         """Updates the DataFrame for the specified symbol with new tick data.
@@ -28,35 +52,47 @@ class DataManager:
             tick (Dict[str, Union[int, float]]): New tick data containing
                 'epoch' for timestamp and 'quote' for price.
         """
+        epoch = tick['tick']['epoch']
+        ask = tick['tick']['ask']
+        bid = tick['tick']['bid']
+        quote = tick['tick']['quote']
+
+        # Create a new row of data
         new_data = pd.DataFrame({
-            'timestamp': [tick['epoch']],
-            'open': [tick['quote']],
-            'high': [tick['quote']],
-            'low': [tick['quote']],
-            'close': [tick['quote']]
+            'timestamp': [epoch],
+            'open': [bid],  # Set open to the current bid price
+            'high': [ask],  # Set high to the current ask price
+            'low': [bid],   # Set low to the current bid price
+            'close': [bid], # Set close to the current bid price
+            'bid': [bid],   # Store the bid price
+            'ask': [ask],   # Store the ask price
+            'quote': [quote] # Store the quote price
         })
 
         # Update the DataFrame for the given symbol
         if symbol in self.symbols:
-            self.symbols[symbol] = pd.concat([self.symbols[symbol], new_data]).tail(self.max_data_points)
+            # If the DataFrame is empty, initialize it with the new data
+            if self.symbols[symbol].empty:
+                self.symbols[symbol] = new_data
+            else:
+                # Check if the last row's timestamp matches the new tick's timestamp
+                last_row = self.symbols[symbol].iloc[-1]
+
+                if last_row['timestamp'] == epoch:
+                    # Update the last row with the new close price
+                    last_row['close'] = bid
+
+                    # Update high and low prices
+                    last_row['high'] = max(last_row['high'], ask)
+                    last_row['low'] = min(last_row['low'], bid)
+
+                    # Append the updated row back to the DataFrame
+                    self.symbols[symbol].iloc[-1] = last_row
+                else:
+                    # If it's a new timestamp, append the new data
+                    self.symbols[symbol] = pd.concat([self.symbols[symbol], new_data]).tail(self.max_data_points)
         else:
             print(f"Symbol {symbol} not found in managed symbols.")
-
-    def get_close_prices(self, symbol: str) -> List[float]:
-        return self.data[symbol]['close'].tolist()
-
-    def get_ohlc_data(self, symbol: str) -> pd.DataFrame:
-        return self.data[symbol]
-
-    @property
-    def frame(self) -> pd.DataFrame:
-        """The frame object.
-
-        Returns:
-        ----
-        pd.DataFrame -- A pandas data frame with the price data.
-        """
-        return self._frame
 
     @property
     def symbol_groups(self) -> DataFrameGroupBy:
@@ -66,6 +102,10 @@ class DataManager:
         ----
         {DataFrameGroupBy} -- A `pandas.core.groupby.GroupBy` object with each symbol.
         """
+        # Ensure the frame is populated
+        if self._frame is None or self._frame.empty:
+            return pd.DataFrame().groupby([])
+
         # Group by Symbol.
         self._symbol_groups = self._frame.groupby(
             by='symbol',
@@ -87,57 +127,25 @@ class DataManager:
         """
         # Ensure symbol groups exist.
         if self._symbol_groups is None:
-            self.symbol_groups
+            self.symbol_groups  # This will initialize _symbol_groups if it is None
 
         self._symbol_rolling_groups = self._symbol_groups.rolling(size)
         return self._symbol_rolling_groups
 
-    def create_frame(self) -> pd.DataFrame:
-        """Creates a new data frame with the data passed through.
-
-        Returns:
-        ----
-        {pd.DataFrame} -- A pandas dataframe.
-        """
-        price_df = pd.DataFrame(data=self._data)
-        price_df = self._parse_datetime_column(price_df=price_df)
-        price_df = self._set_multi_index(price_df=price_df)
-
-        return price_df
-
-    def _parse_datetime_column(self, price_df: pd.DataFrame) -> pd.DataFrame:
-        """Parses the datetime column passed through.
-
-        Arguments:
-        ----
-        price_df {pd.DataFrame} -- The price data frame with a
-            datetime column.
-
-        Returns:
-        ----
-        {pd.DataFrame} -- A pandas dataframe.
-        """
-        price_df['datetime'] = pd.to_datetime(
-            price_df['datetime'],
-            unit='ms', 
-            origin='unix'
-        )
-        return price_df
-
     def _set_multi_index(self, price_df: pd.DataFrame) -> pd.DataFrame:
-        """Converts the dataframe to a multi-index data frame.
+        """Sets a multi-index for the DataFrame.
 
         Arguments:
         ----
-        price_df {pd.DataFrame} -- The price data frame.
+        price_df {pd.DataFrame} -- The price DataFrame.
 
         Returns:
         ----
-        pd.DataFrame -- A pandas dataframe.
+        {pd.DataFrame} -- A pandas DataFrame with a multi-index.
         """
-        price_df = price_df.set_index(keys=['symbol', 'datetime'])
+        # Example implementation; adjust as needed
+        price_df.set_index(['symbol', 'datetime'], inplace=True)
         return price_df
-
     def add_rows(self, data: Dict) -> None:
         """Adds a new row to our StockFrame.
 
@@ -308,3 +316,14 @@ class DataManager:
         Dict[str, pd.DataFrame] -- A dictionary of DataFrames indexed by symbol.
         """
         return self.data
+
+
+def create_subs_cb(data_manager: DataManager, symbol: str):
+    def cb(data):
+        if 'tick' in data:
+            tick = data  # The entire data dictionary is passed
+            data_manager.update(symbol, tick)
+        else:
+            print(f"No tick data for symbol {symbol}")
+    return cb
+

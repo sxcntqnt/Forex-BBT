@@ -32,42 +32,24 @@ milliseconds_since_epoch = DerivAPI.time
 
 
 class ForexBot:
-    def __init__(self, config, connection,  paper_trading: bool = True, credentials_path: str = None, trading_account: str = None) -> None:
-        """Initalizes a new instance of the robot and logs into the API platform specified.
-
-        Arguments:
-        ----
-        client_id {str} -- The Consumer ID assigned to you during the App registration.
-            This can be found at the app registration portal.
-
-        redirect_uri {str} -- This is the redirect URL that you specified when you created your
-            TD Ameritrade Application.
-
-        Keyword Arguments:
-        ----
-        credentials_path {str} -- The path to the session state file used to prevent a full
-            OAuth workflow. (default: {None})
-
-        trading_account {str} -- Your TD Ameritrade account number. (default: {None})
-
-        """
-
-        # Set the attirbutes
+    def __init__(self, config, connection, paper_trading: bool = True, credentials_path: str = None, trading_account: str = None) -> None:
+        """Initializes the ForexBot."""
+        # Set the attributes
         self.trading_account = trading_account
         self.Backtesters = {}
         self.historical_prices = {}
         self.stock_frame: DataManager = None
         self.paper_trading = paper_trading
-
         self._bar_size = None
         self._bar_type = None
-
-
         self.config = config
         self.api = DerivAPI(connection=connection)
-        self.strategy_manager = StrategyManager(DataManager)
+        
+        # Initialize DataManager with the appropriate symbols
+        self.data_manager: DataManager = DataManager(config, [], config.SYMBOLS)
+        
+        self.strategy_manager = StrategyManager(self.data_manager)
         self.risk_manager = RiskManager(config)
-        self.data_manager : DataManager =None 
         self.backtester = Backtester(config, self.api, self.data_manager, self.strategy_manager)
         self.monitor = Monitor(config, self.backtester)
         self.portfolio_manager = PortfolioManager(config)
@@ -104,13 +86,14 @@ class ForexBot:
 
     def create_tick_callback(self, symbol):
         count = 0
+
         def callback(data):
             nonlocal count
             count += 1
-            self.data_manager.update(symbol, data)
+            self.data_manager.update(symbol, data)  # Update the DataManager with the tick data
             self.logger.info(f"Received tick for {symbol}: {data}. Count: {count}")
-        return callback
 
+        return callback
     async def check_trades(self):
         for symbol in self.config.SYMBOLS:
             if self.strategy_manager.should_enter_trade(symbol, self.data_manager):
