@@ -2,3 +2,5 @@ __pycache__
 .env
 .git/
 config/config.ini
+autoscan.log
+configure.scan
