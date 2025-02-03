@@ -48,7 +48,7 @@ class ForexBot:
         # Initialize DataManager with the appropriate symbols
         self.data_manager: DataManager = DataManager(config, [], config.SYMBOLS)
         
-        self.strategy_manager = StrategyManager(self.data_manager)
+        self.strategy_manager = StrategyManager(self.data_manager, config)
         self.risk_manager = RiskManager(config)
         self.backtester = Backtester(config, self.api, self.data_manager, self.strategy_manager)
         self.monitor = Monitor(config, self.backtester)

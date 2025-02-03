@@ -95,10 +95,19 @@ class DataManager:
             print(f"Symbol {symbol} not found in managed symbols.")
 
     def get_close_prices(self, symbol: str) -> List[float]:
-        return self.data[symbol]['close'].tolist()
+        """Retrieves the close prices for the specified symbol."""
+        close_prices = []
+        for entry in self._data:
+            if entry.get('symbol') == symbol:  # Assuming each entry has a 'symbol' key
+                close_prices.append(entry['close'])
+        return close_prices
 
     def get_ohlc_data(self, symbol: str) -> pd.DataFrame:
-        return self.data[symbol]
+        """Retrieves the OHLC data for the specified symbol."""
+        if symbol in self.symbols:
+            return self.symbols[symbol]
+        else:
+            raise ValueError(f"Symbol '{symbol}' not found in managed symbols.")   
         
     @property
     def symbol_groups(self) -> DataFrameGroupBy:
