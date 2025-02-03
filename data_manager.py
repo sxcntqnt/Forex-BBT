@@ -94,6 +94,12 @@ class DataManager:
         else:
             print(f"Symbol {symbol} not found in managed symbols.")
 
+    def get_close_prices(self, symbol: str) -> List[float]:
+        return self.data[symbol]['close'].tolist()
+
+    def get_ohlc_data(self, symbol: str) -> pd.DataFrame:
+        return self.data[symbol]
+        
     @property
     def symbol_groups(self) -> DataFrameGroupBy:
         """Returns the Groups in the StockFrame.
