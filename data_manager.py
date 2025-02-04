@@ -6,6 +6,7 @@ from typing import List, Dict, Union
 from pandas.core.groupby import DataFrameGroupBy
 from pandas.core.window import RollingGroupby
 
+
 class DataManager:
     def __init__(self, config, data: List[Dict], symbols: List[str]) -> None:
         """Initializes the Stock Data Manager.
@@ -21,13 +22,38 @@ class DataManager:
         self._symbol_groups: DataFrameGroupBy = None
         self._symbol_rolling_groups: RollingGroupby = None
         # Initialize symbols with empty DataFrames
-        self.symbols = {symbol: pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'bid', 'ask', 'quote']) for symbol in symbols}
+        self.symbols = {
+            symbol: pd.DataFrame(
+                columns=[
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "bid",
+                    "ask",
+                    "quote",
+                ]
+            )
+            for symbol in symbols
+        }
         self.max_data_points = 1000
 
     def create_frame(self) -> pd.DataFrame:
         """Creates a DataFrame from the initial data."""
         if not self._data:  # If there's no data, return an empty DataFrame
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'bid', 'ask', 'quote'])
+            return pd.DataFrame(
+                columns=[
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "bid",
+                    "ask",
+                    "quote",
+                ]
+            )
 
         price_df = pd.DataFrame(data=self._data)
         price_df = self._parse_datetime_column(price_df=price_df)
@@ -37,69 +63,64 @@ class DataManager:
 
     def _parse_datetime_column(self, price_df: pd.DataFrame) -> pd.DataFrame:
         """Parses the datetime column passed through."""
-        price_df['datetime'] = pd.to_datetime(
-            price_df['epoch'],
-            unit='s',
-            origin='unix'
+        price_df["datetime"] = pd.to_datetime(
+            price_df["epoch"], unit="s", origin="unix"
         )
         return price_df
 
-    def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
-        """Updates the DataFrame for the specified symbol with new tick data.
 
-        Args:
-            symbol (str): The stock symbol to update.
-            tick (Dict[str, Union[int, float]]): New tick data containing
-                'epoch' for timestamp and 'quote' for price.
-        """
-        epoch = tick['tick']['epoch']
-        ask = tick['tick']['ask']
-        bid = tick['tick']['bid']
-        quote = tick['tick']['quote']
+async def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
+    """Updates the DataFrame for the specified symbol with new tick data.
 
-        # Create a new row of data
-        new_data = pd.DataFrame({
-            'timestamp': [epoch],
-            'open': [bid],  # Set open to the current bid price
-            'high': [ask],  # Set high to the current ask price
-            'low': [bid],   # Set low to the current bid price
-            'close': [bid], # Set close to the current bid price
-            'bid': [bid],   # Store the bid price
-            'ask': [ask],   # Store the ask price
-            'quote': [quote] # Store the quote price
-        })
+    Args:
+        symbol (str): The stock symbol to update.
+        tick (Dict[str, Union[int, float]]): New tick data containing
+            'epoch' for timestamp and 'quote' for price.
+    """
+    epoch = tick["tick"]["epoch"]
+    ask = tick["tick"]["ask"]
+    bid = tick["tick"]["bid"]
+    quote = tick["tick"]["quote"]
 
-        # Update the DataFrame for the given symbol
-        if symbol in self.symbols:
-            # If the DataFrame is empty, initialize it with the new data
-            if self.symbols[symbol].empty:
-                self.symbols[symbol] = new_data
-            else:
-                # Check if the last row's timestamp matches the new tick's timestamp
-                last_row = self.symbols[symbol].iloc[-1]
+    # Create a new row of data
+    new_data = pd.DataFrame(
+        {
+            "timestamp": [epoch],
+            "open": [bid],  # Set open to the current bid price
+            "high": [ask],  # Set high to the current ask price
+            "low": [bid],  # Set low to the current bid price
+            "close": [bid],  # Set close to the current bid price
+            "bid": [bid],  # Store the bid price
+            "ask": [ask],  # Store the ask price
+            "quote": [quote],  # Store the quote price
+        }
+    )
 
-                if last_row['timestamp'] == epoch:
-                    # Update the last row with the new close price
-                    last_row['close'] = bid
-
-                    # Update high and low prices
-                    last_row['high'] = max(last_row['high'], ask)
-                    last_row['low'] = min(last_row['low'], bid)
-
-                    # Append the updated row back to the DataFrame
-                    self.symbols[symbol].iloc[-1] = last_row
-                else:
-                    # If it's a new timestamp, append the new data
-                    self.symbols[symbol] = pd.concat([self.symbols[symbol], new_data]).tail(self.max_data_points)
+    # Update the DataFrame for the given symbol
+    if symbol in self.symbols:
+        if self.symbols[symbol].empty:
+            self.symbols[symbol] = new_data
         else:
-            print(f"Symbol {symbol} not found in managed symbols.")
+            last_row = self.symbols[symbol].iloc[-1]
+
+            if last_row["timestamp"] == epoch:
+                last_row["close"] = bid
+                last_row["high"] = max(last_row["high"], ask)
+                last_row["low"] = min(last_row["low"], bid)
+                self.symbols[symbol].iloc[-1] = last_row
+            else:
+                self.symbols[symbol] = pd.concat([self.symbols[symbol], new_data]).tail(
+                    self.max_data_points
+                )
+    else:
+        print(f"Symbol {symbol} not found in managed symbols.")
 
     def get_close_prices(self, symbol: str) -> List[float]:
         """Retrieves the close prices for the specified symbol."""
         close_prices = []
         for entry in self._data:
-            if entry.get('symbol') == symbol:  # Assuming each entry has a 'symbol' key
-                close_prices.append(entry['close'])
+            if entry.get("symbol") == symbol:  # Assuming each entry has a 'symbol' key
+                close_prices.append(entry["close"])
         return close_prices
 
     def get_ohlc_data(self, symbol: str) -> pd.DataFrame:
@@ -107,8 +128,8 @@ class DataManager:
         if symbol in self.symbols:
             return self.symbols[symbol]
         else:
-            raise ValueError(f"Symbol '{symbol}' not found in managed symbols.")   
-        
+            raise ValueError(f"Symbol '{symbol}' not found in managed symbols.")
+
     @property
     def symbol_groups(self) -> DataFrameGroupBy:
         """Returns the Groups in the StockFrame.
@@ -123,13 +144,11 @@ class DataManager:
 
         # Group by Symbol.
         self._symbol_groups = self._frame.groupby(
-            by='symbol',
-            as_index=False,
-            sort=True
+            by="symbol", as_index=False, sort=True
         )
         return self._symbol_groups
 
-    def symbol_rolling_groups(self, size: int) -> RollingGroupby:
+    async def symbol_rolling_groups(self, size: int) -> RollingGroupby:
         """Grabs the windows for each group.
 
         Arguments:
@@ -159,8 +178,9 @@ class DataManager:
         {pd.DataFrame} -- A pandas DataFrame with a multi-index.
         """
         # Example implementation; adjust as needed
-        price_df.set_index(['symbol', 'datetime'], inplace=True)
+        price_df.set_index(["symbol", "datetime"], inplace=True)
         return price_df
+
     def add_rows(self, data: Dict) -> None:
         """Adds a new row to our StockFrame.
 
@@ -168,26 +188,22 @@ class DataManager:
         ----
         data {Dict} -- A list of quotes.
         """
-        column_names = ['open', 'close', 'high', 'low', 'volume']
+        column_names = ["open", "close", "high", "low", "volume"]
 
         for quote in data:
             # Parse the Timestamp.
-            time_stamp = pd.to_datetime(
-                quote['datetime'],
-                unit='ms',
-                origin='unix'
-            )
+            time_stamp = pd.to_datetime(quote["datetime"], unit="ms", origin="unix")
 
             # Define the Index Tuple.
-            row_id = (quote['symbol'], time_stamp)
+            row_id = (quote["symbol"], time_stamp)
 
             # Define the values.
             row_values = [
-                quote['open'],
-                quote['close'],
-                quote['high'],
-                quote['low'],
-                quote['volume']
+                quote["open"],
+                quote["close"],
+                quote["high"],
+                quote["low"],
+                quote["volume"],
             ]
 
             # Create a new row.
@@ -216,9 +232,16 @@ class DataManager:
         if not missing_columns:
             return True
         else:
-            raise KeyError(f"The following indicator columns are missing from the StockFrame: {missing_columns}")
+            raise KeyError(
+                f"The following indicator columns are missing from the StockFrame: {missing_columns}"
+            )
 
-    def _check_signals(self, indicators: Dict, indicators_comp_key: List[str], indicators_key: List[str]) -> Union[pd.DataFrame, None]:
+    def _check_signals(
+        self,
+        indicators: Dict,
+        indicators_comp_key: List[str],
+        indicators_key: List[str],
+    ) -> Union[pd.DataFrame, None]:
         """Returns the last row of the StockFrame if conditions are met.
 
         Arguments:
@@ -243,42 +266,42 @@ class DataManager:
                 column = last_rows[indicator]
 
                 # Grab Buy & Sell Conditions.
-                buy_condition_target = indicators[indicator]['buy']
-                sell_condition_target = indicators[indicator]['sell']
+                buy_condition_target = indicators[indicator]["buy"]
+                sell_condition_target = indicators[indicator]["sell"]
 
-                buy_condition_operator = indicators[indicator]['buy_operator']
-                sell_condition_operator = indicators[indicator]['sell_operator']
+                buy_condition_operator = indicators[indicator]["buy_operator"]
+                sell_condition_operator = indicators[indicator]["sell_operator"]
 
                 condition_1 = buy_condition_operator(column, buy_condition_target)
                 condition_2 = sell_condition_operator(column, sell_condition_target)
 
-                conditions['buys'] = condition_1.where(lambda x: x).dropna()
-                conditions['sells'] = condition_2.where(lambda x: x).dropna()
+                conditions["buys"] = condition_1.where(lambda x: x).dropna()
+                conditions["sells"] = condition_2.where(lambda x: x).dropna()
 
         # Store the indicators in a list.
         check_indicators = []
-        
+
         # Split names to check if indicators exist.
         for indicator in indicators_comp_key:
-            check_indicators.extend(indicator.split('_comp_'))
+            check_indicators.extend(indicator.split("_comp_"))
 
         if self.do_indicator_exist(column_names=check_indicators):
             for indicator in indicators_comp_key:
-                parts = indicator.split('_comp_')
+                parts = indicator.split("_comp_")
                 indicator_1 = last_rows[parts[0]]
                 indicator_2 = last_rows[parts[1]]
 
                 # If buy operator exists.
-                if indicators[indicator].get('buy_operator'):
-                    buy_condition_operator = indicators[indicator]['buy_operator']
+                if indicators[indicator].get("buy_operator"):
+                    buy_condition_operator = indicators[indicator]["buy_operator"]
                     condition_1 = buy_condition_operator(indicator_1, indicator_2)
-                    conditions['buys'] = condition_1.where(lambda x: x).dropna()
+                    conditions["buys"] = condition_1.where(lambda x: x).dropna()
 
                 # If sell operator exists.
-                if indicators[indicator].get('sell_operator'):
-                    sell_condition_operator = indicators[indicator]['sell_operator']
+                if indicators[indicator].get("sell_operator"):
+                    sell_condition_operator = indicators[indicator]["sell_operator"]
                     condition_2 = sell_condition_operator(indicator_1, indicator_2)
-                    conditions['sells'] = condition_2.where(lambda x: x).dropna()
+                    conditions["sells"] = condition_2.where(lambda x: x).dropna()
 
         return pd.DataFrame(conditions) if conditions else None
 
@@ -307,18 +330,23 @@ class DataManager:
         """
         df = self.get_ohlc_data(symbol)
         for indicator, params in indicators.items():
-            if indicator == 'SMA':
-                window = params.get('window', 14)
-                df[f'{indicator}_{window}'] = df['close'].rolling(window=window).mean()
-            elif indicator == 'EMA':
-                span = params.get('span', 14)
-                df[f'{indicator}_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
+            if indicator == "SMA":
+                window = params.get("window", 14)
+                df[f"{indicator}_{window}"] = df["close"].rolling(window=window).mean()
+            elif indicator == "EMA":
+                span = params.get("span", 14)
+                df[f"{indicator}_{span}"] = (
+                    df["close"].ewm(span=span, adjust=False).mean()
+                )
             # Add more indicators as needed
         self.data[symbol] = df
 
     def reset_data(self) -> None:
         """Resets the internal data structures, clearing all stored information."""
-        self.data = {symbol: pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close']) for symbol in self.symbols}
+        self.data = {
+            symbol: pd.DataFrame(columns=["timestamp", "open", "high", "low", "close"])
+            for symbol in self.symbols
+        }
         self._frame = self.create_frame()
         self._symbol_groups = None
         self._symbol_rolling_groups = None
@@ -330,15 +358,15 @@ class DataManager:
         ----
         Dict[str, pd.DataFrame] -- A dictionary of DataFrames indexed by symbol.
         """
-        return self.data
+        return self._data
 
 
 def create_subs_cb(data_manager: DataManager, symbol: str):
     def cb(data):
-        if 'tick' in data:
+        if "tick" in data:
             tick = data  # The entire data dictionary is passed
             data_manager.update(symbol, tick)
         else:
             print(f"No tick data for symbol {symbol}")
-    return cb
 
+    return cb

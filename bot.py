@@ -26,8 +26,6 @@ from backtester import Backtester
 
 
 # We are going to be doing some timestamp conversions.
-milliseconds_since_epoch = DerivAPI.time
-
 
 
 
@@ -57,6 +55,15 @@ class ForexBot:
         self.logger = logging.getLogger(__name__)
         self.running = False
         self.subscriptions = {}
+        self.start_date = datetime.now() - timedelta(days=config.HISTORICAL_DAYS)
+        self.end_date = datetime.now()
+
+    async def get_server_time(api):
+        response = await api.time({"time": 1})  # Call the async method correctly
+        return response.get("time")  # Extract the epoch time
+
+        server_time = await get_server_time(api)
+        print(f"Server Epoch Time: {server_time}")
 
     async def run(self):
         self.running = True
@@ -94,10 +101,11 @@ class ForexBot:
             self.logger.info(f"Received tick for {symbol}: {data}. Count: {count}")
 
         return callback
+
     async def check_trades(self):
         for symbol in self.config.SYMBOLS:
             if self.strategy_manager.should_enter_trade(symbol, self.data_manager):
-                await self.enter_trade(symbol)
+                await self.enter_trade(data,symbol)
 
         await self.monitor.check_open_positions(self.api)
         await self.performance_monitor.update(self.portfolio_manager)
@@ -130,6 +138,18 @@ class ForexBot:
             except Exception as e:
                 self.logger.error(f"Error unsubscribing from {symbol}: {e}")
         self.subscriptions.clear()
+
+    async def initialize_data_manager(self, config, api):
+        """Initialize the DataManager with historical data."""
+        start_date = datetime.now() - timedelta(days=config.HISTORICAL_DAYS)
+        end_date = datetime.now()
+        historical_data = []
+
+        for symbol in config.SYMBOLS:
+            data = self.grab_historical_prices(start_date, end_date, config.TIMEFRAME, symbol)
+            historical_data.extend(data)
+
+        return DataManager(config, historical_data, config.SYMBOLS)
 
     def stop(self):
         self.running = False
@@ -501,8 +521,11 @@ class ForexBot:
         quotes = self.session.get_quotes(instruments=list(symbols))
 
         return quotes
+    @staticmethod
+    def milliseconds_since_epoch(dt):
+        return int(dt.timestamp() * 1000)
 
-    def grab_historical_prices(self, start: datetime, end: datetime, bar_size: int = 1,
+    def grab_historical_prices(self, start_date: datetime, end_date: datetime, bar_size: int = 1,
                                bar_type: str = 'minute', symbols: List[str] = None) -> List[dict]:
         """Grabs the historical prices for all the postions in a portfolio.
 
@@ -550,9 +573,10 @@ class ForexBot:
         self._bar_size = bar_size
         self._bar_type = bar_type
 
-        start = str(milliseconds_since_epoch(dt_object=start))
-        end = str(milliseconds_since_epoch(dt_object=end))
-
+        start = str(self.milliseconds_since_epoch(start_date))
+        end = str(self.milliseconds_since_epoch(end_date))
+        print(f"start value: {start}, type: {type(start)}")
+        print(f"start value: {end}, type: {type(end)}")
         new_prices = []
 
         if not symbols:

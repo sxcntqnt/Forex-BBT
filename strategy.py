@@ -5,7 +5,13 @@ from typing import Union
 import talib
 import numpy as np
 from data_manager import DataManager
+
+from configparser import ConfigParser
+from datetime import datetime
+from datetime import timedelta
+
 from config import Config
+
 from sklearn.ensemble import RandomForestRegressor
 import pandas as pd
 
@@ -38,7 +44,7 @@ class StrategyManager:
         """
 
         self._stock_frame: DataManager = price_dataframe
-        self._price_groups = price_dataframe.symbol_groups
+        self._price_groups = price_dataframe._symbol_groups
         self._current_indicators = {}
         self._indicator_signals = {}
         self._frame = self._stock_frame._frame
@@ -1107,41 +1113,48 @@ class MACDStrategy:
         macd, signal, _ = talib.MACD(close_prices, fastperiod=self.fast_period, slowperiod=self.slow_period, signalperiod=self.signal_period)
         return macd[-1] > signal[-1] and macd[-2] <= signal[-2]
 
+
 class MLStrategy:
     def __init__(self):
         self.model = RandomForestRegressor(n_estimators=100, random_state=42)
         self.trained = False
+        self.config = Config()
 
     def should_enter_trade(self, symbol, data_manager):
         if not self.trained:
-            self.train(data_manager)
+            self.train(data_manager, symbol)  # Pass symbol here
 
         features = self.extract_features(symbol, data_manager)
         prediction = self.model.predict([features])[0]
         current_price = data_manager.get_close_prices(symbol)[-1]
-        
+
         return prediction > current_price * 1.001  # Predict 0.1% increase
 
-    def train(self, data_manager):
-        X, y = self.prepare_training_data(data_manager)
+    def train(self, data_manager, symbol):
+        # Fetch historical data for the symbol
+        start_date = datetime.now() - timedelta(days=self.config.HISTORICAL_DAYS)
+        end_date = datetime.now()
+        historical_data = grab_historical_prices(symbol, start_date, end_date, self.config.TIMEFRAME)
+
+        # Prepare training data
+        X, y = self.prepare_training_data(data_manager, symbol)
         self.model.fit(X, y)
         self.trained = True
 
-    def prepare_training_data(self, DataManager):
+    def prepare_training_data(self, data_manager, symbol):
         X, y = [], []
-        for symbol in DataManager.symbols:
-            prices = DataManager.get_close_prices(symbol)
-        
-            # Check if there are enough prices
-            if len(prices) < 11:
-                print(f"Not enough prices for {symbol}: {len(prices)}")
-                continue
+        prices = data_manager.get_close_prices(symbol)  # Fetch prices for the symbol
 
-            for i in range(len(prices) - 11):
-                features = self.extract_features(symbol, DataManager, i)
-                target = (prices[i+10] - prices[i+9]) / prices[i+9]  # Next candle's return
-                X.append(features)
-                y.append(target)
+        # Check if there are enough prices
+        if len(prices) < 11:
+            print(f"Not enough prices for {symbol}: {len(prices)}")
+            raise ValueError("Not enough data to train the model.")
+
+        for i in range(len(prices) - 11):
+            features = self.extract_features(symbol, data_manager, i)
+            target = (prices[i+10] - prices[i+9]) / prices[i+9]  # Next candle's return
+            X.append(features)
+            y.append(target)
 
         # Convert to NumPy arrays
         X, y = np.array(X), np.array(y)
@@ -1151,7 +1164,6 @@ class MLStrategy:
             raise ValueError("Not enough data to train the model.")
 
         return X, y
-
     def extract_features(self, symbol, data_manager, offset=0):
         prices = data_manager.get_close_prices(symbol)[offset:offset + 10]
         returns = np.diff(prices) / prices[:-1]
