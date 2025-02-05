@@ -16,6 +16,7 @@ from typing import Union
 
 from deriv_api import DerivAPI
 from rx import Observable
+from config import Config
 from strategy import StrategyManager
 from risk_manager import RiskManager
 from monitor import Monitor
@@ -28,9 +29,15 @@ from backtester import Backtester
 # We are going to be doing some timestamp conversions.
 
 
-
 class ForexBot:
-    def __init__(self, config, connection, paper_trading: bool = True, credentials_path: str = None, trading_account: str = None) -> None:
+    def __init__(
+        self,
+        config,
+        connection,
+        paper_trading: bool = True,
+        credentials_path: str = None,
+        trading_account: str = None,
+    ) -> None:
         """Initializes the ForexBot."""
         # Set the attributes
         self.trading_account = trading_account
@@ -40,15 +47,17 @@ class ForexBot:
         self.paper_trading = paper_trading
         self._bar_size = None
         self._bar_type = None
-        self.config = config
+        self.config = Config()
         self.api = DerivAPI(connection=connection)
-        
+
         # Initialize DataManager with the appropriate symbols
         self.data_manager: DataManager = DataManager(config, [], config.SYMBOLS)
-        
+
         self.strategy_manager = StrategyManager(self.data_manager, config)
         self.risk_manager = RiskManager(config)
-        self.backtester = Backtester(config, self.api, self.data_manager, self.strategy_manager)
+        self.backtester = Backtester(
+            config, self.api, self.data_manager, self.strategy_manager
+        )
         self.monitor = Monitor(config, self.backtester)
         self.portfolio_manager = PortfolioManager(config)
         self.performance_monitor = PerformanceMonitor()
@@ -67,7 +76,7 @@ class ForexBot:
 
     async def run(self):
         self.running = True
-        await self.api.authorize({'authorize': self.config.API_TOKEN})
+        await self.api.authorize({"authorize": self.config.API_TOKEN})
         self.logger.info("Authorized successfully.")
 
         # Subscribe to active symbols
@@ -84,7 +93,9 @@ class ForexBot:
 
     async def subscribe_to_symbol(self, symbol):
         try:
-            tick_stream: Observable = await self.api.subscribe({'ticks': symbol, 'subscribe': 1})
+            tick_stream: Observable = await self.api.subscribe(
+                {"ticks": symbol, "subscribe": 1}
+            )
             self.subscriptions[symbol] = tick_stream
             tick_stream.subscribe(self.create_tick_callback(symbol))
             self.logger.info(f"Subscribed to {symbol} tick stream.")
@@ -97,7 +108,9 @@ class ForexBot:
         def callback(data):
             nonlocal count
             count += 1
-            self.data_manager.update(symbol, data)  # Update the DataManager with the tick data
+            self.data_manager.update(
+                symbol, data
+            )  # Update the DataManager with the tick data
             self.logger.info(f"Received tick for {symbol}: {data}. Count: {count}")
 
         return callback
@@ -105,25 +118,29 @@ class ForexBot:
     async def check_trades(self):
         for symbol in self.config.SYMBOLS:
             if self.strategy_manager.should_enter_trade(symbol, self.data_manager):
-                await self.enter_trade(data,symbol)
+                await self.enter_trade(data, symbol)
 
         await self.monitor.check_open_positions(self.api)
         await self.performance_monitor.update(self.portfolio_manager)
 
     async def enter_trade(self, symbol):
         if not self.risk_manager.can_enter_trade(symbol):
-            self.logger.warning(f"Cannot enter trade for {symbol}: risk management rules not satisfied.")
+            self.logger.warning(
+                f"Cannot enter trade for {symbol}: risk management rules not satisfied."
+            )
             return
 
         try:
             position_size = self.risk_manager.calculate_position_size(symbol)
-            contract = await self.api.buy({
-                "contract_type": "CALL",
-                "amount": position_size,
-                "symbol": symbol,
-                "duration": 5,
-                "duration_unit": "m"
-            })
+            contract = await self.api.buy(
+                {
+                    "contract_type": "CALL",
+                    "amount": position_size,
+                    "symbol": symbol,
+                    "duration": 5,
+                    "duration_unit": "m",
+                }
+            )
             self.monitor.add_position(contract)
             self.portfolio_manager.add_trade(symbol, contract)
             self.logger.info(f"Entered trade: {contract}")
@@ -133,7 +150,7 @@ class ForexBot:
     async def unsubscribe(self):
         for symbol, subscription in self.subscriptions.items():
             try:
-                await self.api.forget(subscription['subscription']['id'])
+                await self.api.forget(subscription["subscription"]["id"])
                 self.logger.info(f"Unsubscribed from {symbol} tick stream.")
             except Exception as e:
                 self.logger.error(f"Error unsubscribing from {symbol}: {e}")
@@ -146,14 +163,18 @@ class ForexBot:
         historical_data = []
 
         for symbol in config.SYMBOLS:
-            data = self.grab_historical_prices(start_date, end_date, config.TIMEFRAME, symbol)
+            data = await self.grab_historical_prices(
+                start_date, end_date, config.TIMEFRAME, symbol
+            )
             historical_data.extend(data)
 
         return DataManager(config, historical_data, config.SYMBOLS)
 
     def stop(self):
         self.running = False
-        asyncio.create_task(self.unsubscribe())  # Ensure unsubscription happens asynchronously
+        asyncio.create_task(
+            self.unsubscribe()
+        )  # Ensure unsubscription happens asynchronously
         self.logger.info("Stopping the bot...")
 
     async def run_backtest(self):
@@ -185,17 +206,13 @@ class ForexBot:
 
         """
 
-        pre_market_start_time = datetime.utcnow().replace(
-            hour=8,
-            minute=00,
-            second=00
-        ).timestamp()
+        pre_market_start_time = (
+            datetime.utcnow().replace(hour=8, minute=00, second=00).timestamp()
+        )
 
-        market_start_time = datetime.utcnow().replace(
-            hour=13,
-            minute=30,
-            second=00
-        ).timestamp()
+        market_start_time = (
+            datetime.utcnow().replace(hour=13, minute=30, second=00).timestamp()
+        )
 
         right_now = datetime.utcnow().timestamp()
 
@@ -228,17 +245,13 @@ class ForexBot:
 
         """
 
-        post_market_end_time = datetime.utcnow().replace(
-            hour=00,
-            minute=00,
-            second=00
-        ).timestamp()
+        post_market_end_time = (
+            datetime.utcnow().replace(hour=00, minute=00, second=00).timestamp()
+        )
 
-        market_end_time = datetime.utcnow().replace(
-            hour=20,
-            minute=00,
-            second=00
-        ).timestamp()
+        market_end_time = (
+            datetime.utcnow().replace(hour=20, minute=00, second=00).timestamp()
+        )
 
         right_now = datetime.utcnow().timestamp()
 
@@ -271,17 +284,13 @@ class ForexBot:
 
         """
 
-        market_start_time = datetime.utcnow().replace(
-            hour=13,
-            minute=30,
-            second=00
-        ).timestamp()
+        market_start_time = (
+            datetime.utcnow().replace(hour=13, minute=30, second=00).timestamp()
+        )
 
-        market_end_time = datetime.utcnow().replace(
-            hour=20,
-            minute=00,
-            second=00
-        ).timestamp()
+        market_end_time = (
+            datetime.utcnow().replace(hour=20, minute=00, second=00).timestamp()
+        )
 
         right_now = datetime.utcnow().timestamp()
 
@@ -320,7 +329,15 @@ class ForexBot:
 
         return self.portfolio
 
-    def create_trade(self, trade_id: str, enter_or_exit: str, long_or_short: str, order_type: str = 'mkt', price: float = 0.0, stop_limit_price=0.0) -> Backtester:
+    def create_trade(
+        self,
+        trade_id: str,
+        enter_or_exit: str,
+        long_or_short: str,
+        order_type: str = "mkt",
+        price: float = 0.0,
+        stop_limit_price=0.0,
+    ) -> Backtester:
         """Initalizes a new instance of a Backtester Object.
 
         This helps simplify the process of building an order by using pre-built templates that can be
@@ -406,7 +423,7 @@ class ForexBot:
             side=long_or_short,
             enter_or_exit=enter_or_exit,
             price=price,
-            stop_limit_price=stop_limit_price
+            stop_limit_price=stop_limit_price,
         )
 
         # Set the Client.
@@ -521,12 +538,19 @@ class ForexBot:
         quotes = self.session.get_quotes(instruments=list(symbols))
 
         return quotes
+
     @staticmethod
     def milliseconds_since_epoch(dt):
         return int(dt.timestamp() * 1000)
 
-    def grab_historical_prices(self, start_date: datetime, end_date: datetime, bar_size: int = 1,
-                               bar_type: str = 'minute', symbols: List[str] = None) -> List[dict]:
+    async def grab_historical_prices(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        bar_size: int = 1,
+        bar_type: str = "minute",
+        symbols: List[str] = None,
+    ) -> List[dict]:
         """Grabs the historical prices for all the postions in a portfolio.
 
         Overview:
@@ -536,29 +560,23 @@ class ForexBot:
 
         Arguments:
         ----
-        start {datetime} -- Defines the start date for the historical prices.
-
-        end {datetime} -- Defines the end date for the historical prices.
-
-        Keyword Arguments:
-        ----
-        bar_size {int} -- Defines the size of each bar. (default: {1})
-
-        bar_type {str} -- Defines the bar type, can be one of the following:
-            `['minute', 'week', 'month', 'year']` (default: {'minute'})
-
-        symbols {List[str]} -- A list of ticker symbols to pull. (default: None)
+            start_date {datetime} -- Defines the start date for the historical prices.
+            end_date {datetime} -- Defines the end date for the historical prices.
+            bar_size {int} -- Defines the size of each bar. (default: {1})
+            bar_type {str} -- Defines the bar type, can be one of the following:
+                ['minute', 'week', 'month', 'year'] (default: {'minute'})
+            symbols {List[str]} -- A list of ticker symbols to pull. (default: None)
 
         Returns:
         ----
-        {List[Dict]} -- The historical price candles.
+            List[Dict] -- The historical price candles.
 
         Usage:
         ----
             >>> trading_robot = PyRobot(
-                client_id=CLIENT_ID,
-                redirect_uri=REDIRECT_URI,
-                credentials_path=CREDENTIALS_PATH
+                    client_id=CLIENT_ID,
+                    redirect_uri=REDIRECT_URI,
+                    credentials_path=CREDENTIALS_PATH
                 )
             >>> start_date = datetime.today()
             >>> end_date = start_date - timedelta(days=30)
@@ -570,46 +588,76 @@ class ForexBot:
                 )
         """
 
+        print(
+            f"Inside grab_historical_prices - start_date type: {type(start_date)}, value: {start_date}"
+        )
+        print(
+            f"Inside grab_historical_prices - end_date type: {type(end_date)}, value: {end_date}"
+        )
+
+
         self._bar_size = bar_size
         self._bar_type = bar_type
 
-        start = str(self.milliseconds_since_epoch(start_date))
-        end = str(self.milliseconds_since_epoch(end_date))
-        print(f"start value: {start}, type: {type(start)}")
-        print(f"start value: {end}, type: {type(end)}")
-        new_prices = []
+        # Convert to epoch timestamps
+        start_timestamp = self.milliseconds_since_epoch(start_date) // 1000
+        end_timestamp = self.milliseconds_since_epoch(end_date) // 1000
+
+        print(f"DEBUG: start_timestamp = {start_timestamp}, end_timestamp = {end_timestamp}")
+
+        if not start_timestamp or not end_timestamp:
+            raise ValueError("Invalid timestamps calculated")
 
         if not symbols:
-            symbols = self.portfolio.positions
+            symbols = self.portfolio_manager.positions
+
+        print(f"DEBUG: symbols = {symbols}")
+
+        if not symbols:
+            raise ValueError("No symbols provided for historical data retrieval.")
+
+        if self.api is None:
+            raise ValueError("API instance is not initialized!")
+
+        new_prices = []
 
         for symbol in symbols:
+            args = {
+                "symbol": symbol,
+                "start": int(start_timestamp),
+                "end": int(end_timestamp),
+                "granularity": 300,  # Must be one of the allowed values
+                "style": "candles",  # Use 'candles' for OHLC data
+                "count": 5000,  # Fetch more data if needed
+                "adjust_start_time": 1,  # Adjust interval if the market is closed
+            }
 
-            historical_prices_response = self.session.get_price_history(
-                symbol=symbol,
-                period_type='day',
-                start_date=start,
-                end_date=end,
-                frequency_type=bar_type,
-                frequency=bar_size,
-                extended_hours=True
-            )
+            print(f"DEBUG: Arguments for ticks_history: {args}")
 
-            self.historical_prices[symbol] = {}
-            self.historical_prices[symbol]['candles'] = historical_prices_response['candles']
+            # Call API and validate response
+            historical_prices_response = await self.api.ticks_history(args)
 
-            for candle in historical_prices_response['candles']:
+            if historical_prices_response is None:
+                raise ValueError(f"API returned None for {symbol}")
 
-                new_price_mini_dict = {}
-                new_price_mini_dict['symbol'] = symbol
-                new_price_mini_dict['open'] = candle['open']
-                new_price_mini_dict['close'] = candle['close']
-                new_price_mini_dict['high'] = candle['high']
-                new_price_mini_dict['low'] = candle['low']
-                new_price_mini_dict['volume'] = candle['volume']
-                new_price_mini_dict['datetime'] = candle['datetime']
+            if "candles" not in historical_prices_response:
+                raise ValueError(f"Invalid response: {historical_prices_response}")
+
+            self.historical_prices[symbol] = {"candles": historical_prices_response["candles"]}
+
+            for candle in historical_prices_response["candles"]:
+                new_price_mini_dict = {
+                    "symbol": symbol,
+                    "open": candle["open"],
+                    "close": candle["close"],
+                    "high": candle["high"],
+                    "low": candle["low"],
+                    "volume": candle["volume"],
+                    "datetime": candle["epoch"],  # Use 'epoch' instead of 'datetime' if needed
+                }
                 new_prices.append(new_price_mini_dict)
 
-        self.historical_prices['aggregated'] = new_prices
+        self.historical_prices["aggregated"] = new_prices
 
         return self.historical_prices
 
@@ -651,12 +699,12 @@ class ForexBot:
                 # Grab the request.
                 historical_prices_response = self.session.get_price_history(
                     symbol=symbol,
-                    period_type='day',
+                    period_type="day",
                     start_date=start,
                     end_date=end,
                     frequency_type=bar_type,
                     frequency=bar_size,
-                    extended_hours=True
+                    extended_hours=True,
                 )
 
             except:
@@ -666,25 +714,25 @@ class ForexBot:
                 # Grab the request.
                 historical_prices_response = self.session.get_price_history(
                     symbol=symbol,
-                    period_type='day',
+                    period_type="day",
                     start_date=start,
                     end_date=end,
                     frequency_type=bar_type,
                     frequency=bar_size,
-                    extended_hours=True
+                    extended_hours=True,
                 )
 
             # parse the candles.
-            for candle in historical_prices_response['candles'][-1:]:
+            for candle in historical_prices_response["candles"][-1:]:
 
                 new_price_mini_dict = {}
-                new_price_mini_dict['symbol'] = symbol
-                new_price_mini_dict['open'] = candle['open']
-                new_price_mini_dict['close'] = candle['close']
-                new_price_mini_dict['high'] = candle['high']
-                new_price_mini_dict['low'] = candle['low']
-                new_price_mini_dict['volume'] = candle['volume']
-                new_price_mini_dict['datetime'] = candle['datetime']
+                new_price_mini_dict["symbol"] = symbol
+                new_price_mini_dict["open"] = candle["open"]
+                new_price_mini_dict["close"] = candle["close"]
+                new_price_mini_dict["high"] = candle["high"]
+                new_price_mini_dict["low"] = candle["low"]
+                new_price_mini_dict["volume"] = candle["volume"]
+                new_price_mini_dict["datetime"] = candle["datetime"]
                 latest_prices.append(new_price_mini_dict)
 
         return latest_prices
@@ -697,7 +745,9 @@ class ForexBot:
         last_bar_timestamp {pd.DatetimeIndex} -- The last bar's timestamp.
         """
 
-        last_bar_time = last_bar_timestamp.to_pydatetime()[0].replace(tzinfo=timezone.utc)
+        last_bar_time = last_bar_timestamp.to_pydatetime()[0].replace(
+            tzinfo=timezone.utc
+        )
         next_bar_time = last_bar_time + timedelta(seconds=60)
         curr_bar_time = datetime.now(tz=timezone.utc)
 
@@ -713,17 +763,19 @@ class ForexBot:
         print("=" * 80)
         print("Pausing for the next bar")
         print("-" * 80)
-        print("Curr Time: {time_curr}".format(
-            time_curr=curr_bar_time.strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            "Curr Time: {time_curr}".format(
+                time_curr=curr_bar_time.strftime("%Y-%m-%d %H:%M:%S")
+            )
         )
-        )
-        print("Next Time: {time_next}".format(
-            time_next=next_bar_time.strftime("%Y-%m-%d %H:%M:%S")
-        )
+        print(
+            "Next Time: {time_next}".format(
+                time_next=next_bar_time.strftime("%Y-%m-%d %H:%M:%S")
+            )
         )
         print("Sleep Time: {seconds}".format(seconds=time_to_wait_now))
         print("-" * 80)
-        print('')
+        print("")
 
         time_true.sleep(time_to_wait_now)
 
@@ -744,7 +796,9 @@ class ForexBot:
 
         return self.stock_frame
 
-    def execute_signals(self, signals: List[pd.Series], trades_to_execute: dict) -> List[dict]:
+    def execute_signals(
+        self, signals: List[pd.Series], trades_to_execute: dict
+    ) -> List[dict]:
         """Executes the specified trades for each signal.
 
         Arguments:
@@ -774,10 +828,10 @@ class ForexBot:
                     trades_to_execute=trades_dict
                 )
         """
-        
+
         # Define the Buy and sells.
-        buys: pd.Series = signals['buys']
-        sells: pd.Series = signals['sells']
+        buys: pd.Series = signals["buys"]
+        sells: pd.Series = signals["sells"]
 
         order_responses = []
 
@@ -795,25 +849,22 @@ class ForexBot:
 
                     if self.portfolio.in_portfolio(symbol=symbol):
                         self.portfolio.set_ownership_status(
-                            symbol=symbol,
-                            ownership=True
+                            symbol=symbol, ownership=True
                         )
 
                     # Set the Execution Flag.
-                    trades_to_execute[symbol]['has_executed'] = True
-                    trade_obj: Trade = trades_to_execute[symbol]['buy']['trade_func']
+                    trades_to_execute[symbol]["has_executed"] = True
+                    trade_obj: Trade = trades_to_execute[symbol]["buy"]["trade_func"]
 
                     if not self.paper_trading:
 
                         # Execute the order.
-                        order_response = self.execute_orders(
-                            trade_obj=trade_obj
-                        )
+                        order_response = self.execute_orders(trade_obj=trade_obj)
 
                         order_response = {
-                            'order_id': order_response['order_id'],
-                            'request_body': order_response['request_body'],
-                            'timestamp': datetime.now().isoformat()
+                            "order_id": order_response["order_id"],
+                            "request_body": order_response["request_body"],
+                            "timestamp": datetime.now().isoformat(),
                         }
 
                         order_responses.append(order_response)
@@ -821,9 +872,9 @@ class ForexBot:
                     else:
 
                         order_response = {
-                            'order_id': trade_obj._generate_order_id(),
-                            'request_body': trade_obj.order,
-                            'timestamp': datetime.now().isoformat()
+                            "order_id": trade_obj._generate_order_id(),
+                            "request_body": trade_obj.order,
+                            "timestamp": datetime.now().isoformat(),
                         }
 
                         order_responses.append(order_response)
@@ -840,27 +891,24 @@ class ForexBot:
                 if symbol in trades_to_execute:
 
                     # Set the Execution Flag.
-                    trades_to_execute[symbol]['has_executed'] = True
+                    trades_to_execute[symbol]["has_executed"] = True
 
                     if self.portfolio.in_portfolio(symbol=symbol):
                         self.portfolio.set_ownership_status(
-                            symbol=symbol,
-                            ownership=False
+                            symbol=symbol, ownership=False
                         )
 
-                    trade_obj: Trade = trades_to_execute[symbol]['sell']['trade_func']
+                    trade_obj: Trade = trades_to_execute[symbol]["sell"]["trade_func"]
 
                     if not self.paper_trading:
 
                         # Execute the order.
-                        order_response = self.execute_orders(
-                            trade_obj=trade_obj
-                        )
+                        order_response = self.execute_orders(trade_obj=trade_obj)
 
                         order_response = {
-                            'order_id': order_response['order_id'],
-                            'request_body': order_response['request_body'],
-                            'timestamp': datetime.now().isoformat()
+                            "order_id": order_response["order_id"],
+                            "request_body": order_response["request_body"],
+                            "timestamp": datetime.now().isoformat(),
                         }
 
                         order_responses.append(order_response)
@@ -868,9 +916,9 @@ class ForexBot:
                     else:
 
                         order_response = {
-                            'order_id': trade_obj._generate_order_id(),
-                            'request_body': trade_obj.order,
-                            'timestamp': datetime.now().isoformat()
+                            "order_id": trade_obj._generate_order_id(),
+                            "request_body": trade_obj.order,
+                            "timestamp": datetime.now().isoformat(),
                         }
 
                         order_responses.append(order_response)
@@ -900,8 +948,7 @@ class ForexBot:
 
         # Execute the order.
         order_dict = self.session.place_order(
-            account=self.trading_account,
-            order=trade_obj.order
+            account=self.trading_account, order=trade_obj.order
         )
 
         # Store the order.
@@ -930,20 +977,18 @@ class ForexBot:
                 return str(obj)
 
         # Define the folder.
-        folder: pathlib.PurePath = pathlib.Path(
-            __file__
-        ).parents[1].joinpath("data")
+        folder: pathlib.PurePath = pathlib.Path(__file__).parents[1].joinpath("data")
 
         # See if it exist, if not create it.
         if not folder.exists():
             folder.mkdir()
 
         # Define the file path.
-        file_path = folder.joinpath('orders.json')
+        file_path = folder.joinpath("orders.json")
 
         # First check if the file alread exists.
         if file_path.exists():
-            with open('data/orders.json', 'r') as order_json:
+            with open("data/orders.json", "r") as order_json:
                 orders_list = json.load(order_json)
         else:
             orders_list = []
@@ -952,12 +997,14 @@ class ForexBot:
         orders_list = orders_list + order_response_dict
 
         # Write the new data back.
-        with open(file='data/orders.json', mode='w+') as order_json:
+        with open(file="data/orders.json", mode="w+") as order_json:
             json.dump(obj=orders_list, fp=order_json, indent=4, default=default)
 
         return True
 
-    def get_accounts(self, account_number: str = None, all_accounts: bool = False) -> dict:
+    def get_accounts(
+        self, account_number: str = None, all_accounts: bool = False
+    ) -> dict:
         """Returns all the account balances for a specified account.
 
         Keyword Arguments:
@@ -1006,25 +1053,23 @@ class ForexBot:
         # Depending on how the client was initalized, either use the state account
         # or the one passed through the function.
         if all_accounts:
-            account = 'all'
+            account = "all"
         elif self.trading_account:
             account = self.trading_account
         else:
             account = account_number
 
         # Grab the accounts.
-        accounts = self.session.get_accounts(
-            account=account
-        )
+        accounts = self.session.get_accounts(account=account)
 
         # Parse the account info.
-        accounts_parsed = self._parse_account_balances(
-            accounts_response=accounts
-        )
+        accounts_parsed = self._parse_account_balances(accounts_response=accounts)
 
         return accounts_parsed
 
-    def _parse_account_balances(self, accounts_response: Union[Dict, List]) -> List[Dict]:
+    def _parse_account_balances(
+        self, accounts_response: Union[Dict, List]
+    ) -> List[Dict]:
         """Parses an Account response into a more simplified dictionary.
 
         Arguments:
@@ -1046,46 +1091,48 @@ class ForexBot:
 
                 account_info = accounts_response[account_type_key]
 
-                account_id = account_info['accountId']
-                account_type = account_info['type']
-                account_current_balances = account_info['currentBalances']
+                account_id = account_info["accountId"]
+                account_type = account_info["type"]
+                account_current_balances = account_info["currentBalances"]
                 # account_inital_balances = account_info['initialBalances']
 
-                account_dict['account_number'] = account_id
-                account_dict['account_type'] = account_type
-                account_dict['cash_balance'] = account_current_balances['cashBalance']
-                account_dict['long_market_value'] = account_current_balances['longMarketValue']
+                account_dict["account_number"] = account_id
+                account_dict["account_type"] = account_type
+                account_dict["cash_balance"] = account_current_balances["cashBalance"]
+                account_dict["long_market_value"] = account_current_balances[
+                    "longMarketValue"
+                ]
 
-                account_dict['cash_available_for_trading'] = account_current_balances.get(
-                    'cashAvailableForTrading', 0.0
+                account_dict["cash_available_for_trading"] = (
+                    account_current_balances.get("cashAvailableForTrading", 0.0)
                 )
-                account_dict['cash_available_for_withdrawl'] = account_current_balances.get(
-                    'cashAvailableForWithDrawal', 0.0
+                account_dict["cash_available_for_withdrawl"] = (
+                    account_current_balances.get("cashAvailableForWithDrawal", 0.0)
                 )
-                account_dict['available_funds'] = account_current_balances.get(
-                    'availableFunds', 0.0
+                account_dict["available_funds"] = account_current_balances.get(
+                    "availableFunds", 0.0
                 )
-                account_dict['buying_power'] = account_current_balances.get(
-                    'buyingPower', 0.0
+                account_dict["buying_power"] = account_current_balances.get(
+                    "buyingPower", 0.0
                 )
-                account_dict['day_trading_buying_power'] = account_current_balances.get(
-                    'dayTradingBuyingPower', 0.0
+                account_dict["day_trading_buying_power"] = account_current_balances.get(
+                    "dayTradingBuyingPower", 0.0
                 )
-                account_dict['maintenance_call'] = account_current_balances.get(
-                    'maintenanceCall', 0.0
+                account_dict["maintenance_call"] = account_current_balances.get(
+                    "maintenanceCall", 0.0
                 )
-                account_dict['maintenance_requirement'] = account_current_balances.get(
-                    'maintenanceRequirement', 0.0
+                account_dict["maintenance_requirement"] = account_current_balances.get(
+                    "maintenanceRequirement", 0.0
                 )
 
-                account_dict['short_balance'] = account_current_balances.get(
-                    'shortBalance', 0.0
+                account_dict["short_balance"] = account_current_balances.get(
+                    "shortBalance", 0.0
                 )
-                account_dict['short_market_value'] = account_current_balances.get(
-                    'shortMarketValue', 0.0
+                account_dict["short_market_value"] = account_current_balances.get(
+                    "shortMarketValue", 0.0
                 )
-                account_dict['short_margin_value'] = account_current_balances.get(
-                    'shortMarginValue', 0.0
+                account_dict["short_margin_value"] = account_current_balances.get(
+                    "shortMarginValue", 0.0
                 )
 
                 account_lists.append(account_dict)
@@ -1100,52 +1147,58 @@ class ForexBot:
 
                     account_info = account[account_type_key]
 
-                    account_id = account_info['accountId']
-                    account_type = account_info['type']
-                    account_current_balances = account_info['currentBalances']
+                    account_id = account_info["accountId"]
+                    account_type = account_info["type"]
+                    account_current_balances = account_info["currentBalances"]
                     # account_inital_balances = account_info['initialBalances']
 
-                    account_dict['account_number'] = account_id
-                    account_dict['account_type'] = account_type
-                    account_dict['cash_balance'] = account_current_balances['cashBalance']
-                    account_dict['long_market_value'] = account_current_balances['longMarketValue']
+                    account_dict["account_number"] = account_id
+                    account_dict["account_type"] = account_type
+                    account_dict["cash_balance"] = account_current_balances[
+                        "cashBalance"
+                    ]
+                    account_dict["long_market_value"] = account_current_balances[
+                        "longMarketValue"
+                    ]
 
-                    account_dict['cash_available_for_trading'] = account_current_balances.get(
-                        'cashAvailableForTrading', 0.0
+                    account_dict["cash_available_for_trading"] = (
+                        account_current_balances.get("cashAvailableForTrading", 0.0)
                     )
-                    account_dict['cash_available_for_withdrawl'] = account_current_balances.get(
-                        'cashAvailableForWithDrawal', 0.0
+                    account_dict["cash_available_for_withdrawl"] = (
+                        account_current_balances.get("cashAvailableForWithDrawal", 0.0)
                     )
-                    account_dict['available_funds'] = account_current_balances.get(
-                        'availableFunds', 0.0
+                    account_dict["available_funds"] = account_current_balances.get(
+                        "availableFunds", 0.0
                     )
-                    account_dict['buying_power'] = account_current_balances.get(
-                        'buyingPower', 0.0
+                    account_dict["buying_power"] = account_current_balances.get(
+                        "buyingPower", 0.0
                     )
-                    account_dict['day_trading_buying_power'] = account_current_balances.get(
-                        'dayTradingBuyingPower', 0.0
+                    account_dict["day_trading_buying_power"] = (
+                        account_current_balances.get("dayTradingBuyingPower", 0.0)
                     )
-                    account_dict['maintenance_call'] = account_current_balances.get(
-                        'maintenanceCall', 0.0
+                    account_dict["maintenance_call"] = account_current_balances.get(
+                        "maintenanceCall", 0.0
                     )
-                    account_dict['maintenance_requirement'] = account_current_balances.get(
-                        'maintenanceRequirement', 0.0
+                    account_dict["maintenance_requirement"] = (
+                        account_current_balances.get("maintenanceRequirement", 0.0)
                     )
-                    account_dict['short_balance'] = account_current_balances.get(
-                        'shortBalance', 0.0
+                    account_dict["short_balance"] = account_current_balances.get(
+                        "shortBalance", 0.0
                     )
-                    account_dict['short_market_value'] = account_current_balances.get(
-                        'shortMarketValue', 0.0
+                    account_dict["short_market_value"] = account_current_balances.get(
+                        "shortMarketValue", 0.0
                     )
-                    account_dict['short_margin_value'] = account_current_balances.get(
-                        'shortMarginValue', 0.0
+                    account_dict["short_margin_value"] = account_current_balances.get(
+                        "shortMarginValue", 0.0
                     )
 
                     account_lists.append(account_dict)
 
         return account_lists
 
-    def get_positions(self, account_number: str = None, all_accounts: bool = False) -> List[Dict]:
+    def get_positions(
+        self, account_number: str = None, all_accounts: bool = False
+    ) -> List[Dict]:
         """Gets all the positions for a specified account number.
 
         Arguments:
@@ -1211,26 +1264,23 @@ class ForexBot:
         """
 
         if all_accounts:
-            account = 'all'
+            account = "all"
         elif self.trading_account and account_number is None:
             account = self.trading_account
         else:
             account = account_number
 
         # Grab the positions.
-        positions = self.session.get_accounts(
-            account=account,
-            fields=['positions']
-        )
+        positions = self.session.get_accounts(account=account, fields=["positions"])
 
         # Parse the positions.
-        positions_parsed = self._parse_account_positions(
-            positions_response=positions
-        )
+        positions_parsed = self._parse_account_positions(positions_response=positions)
 
         return positions_parsed
 
-    def _parse_account_positions(self, positions_response: Union[List, Dict]) -> List[Dict]:
+    def _parse_account_positions(
+        self, positions_response: Union[List, Dict]
+    ) -> List[Dict]:
         """Parses the response from the `get_positions` into a more simplified list.
 
         Arguments:
@@ -1250,33 +1300,39 @@ class ForexBot:
 
                 account_info = positions_response[account_type_key]
 
-                account_id = account_info['accountId']
-                positions = account_info['positions']
+                account_id = account_info["accountId"]
+                positions = account_info["positions"]
 
                 for position in positions:
                     position_dict = {}
-                    position_dict['account_number'] = account_id
-                    position_dict['average_price'] = position['averagePrice']
-                    position_dict['market_value'] = position['marketValue']
-                    position_dict['current_day_profit_loss_percentage'] = position['currentDayProfitLossPercentage']
-                    position_dict['current_day_profit_loss'] = position['currentDayProfitLoss']
-                    position_dict['long_quantity'] = position['longQuantity']
-                    position_dict['short_quantity'] = position['shortQuantity']
-                    position_dict['settled_long_quantity'] = position['settledLongQuantity']
-                    position_dict['settled_short_quantity'] = position['settledShortQuantity']
+                    position_dict["account_number"] = account_id
+                    position_dict["average_price"] = position["averagePrice"]
+                    position_dict["market_value"] = position["marketValue"]
+                    position_dict["current_day_profit_loss_percentage"] = position[
+                        "currentDayProfitLossPercentage"
+                    ]
+                    position_dict["current_day_profit_loss"] = position[
+                        "currentDayProfitLoss"
+                    ]
+                    position_dict["long_quantity"] = position["longQuantity"]
+                    position_dict["short_quantity"] = position["shortQuantity"]
+                    position_dict["settled_long_quantity"] = position[
+                        "settledLongQuantity"
+                    ]
+                    position_dict["settled_short_quantity"] = position[
+                        "settledShortQuantity"
+                    ]
 
-                    position_dict['symbol'] = position['instrument']['symbol']
-                    position_dict['cusip'] = position['instrument']['cusip']
-                    position_dict['asset_type'] = position['instrument']['assetType']
-                    position_dict['sub_asset_type'] = position['instrument'].get(
-                        'subAssetType', ""
+                    position_dict["symbol"] = position["instrument"]["symbol"]
+                    position_dict["cusip"] = position["instrument"]["cusip"]
+                    position_dict["asset_type"] = position["instrument"]["assetType"]
+                    position_dict["sub_asset_type"] = position["instrument"].get(
+                        "subAssetType", ""
                     )
-                    position_dict['description'] = position['instrument'].get(
-                        'description', ""
+                    position_dict["description"] = position["instrument"].get(
+                        "description", ""
                     )
-                    position_dict['type'] = position['instrument'].get(
-                        'type', ""
-                    )
+                    position_dict["type"] = position["instrument"].get("type", "")
 
                     positions_lists.append(position_dict)
 
@@ -1288,33 +1344,41 @@ class ForexBot:
 
                     account_info = account[account_type_key]
 
-                    account_id = account_info['accountId']
-                    positions = account_info['positions']
+                    account_id = account_info["accountId"]
+                    positions = account_info["positions"]
 
                     for position in positions:
                         position_dict = {}
-                        position_dict['account_number'] = account_id
-                        position_dict['average_price'] = position['averagePrice']
-                        position_dict['market_value'] = position['marketValue']
-                        position_dict['current_day_profit_loss_percentage'] = position['currentDayProfitLossPercentage']
-                        position_dict['current_day_profit_loss'] = position['currentDayProfitLoss']
-                        position_dict['long_quantity'] = position['longQuantity']
-                        position_dict['short_quantity'] = position['shortQuantity']
-                        position_dict['settled_long_quantity'] = position['settledLongQuantity']
-                        position_dict['settled_short_quantity'] = position['settledShortQuantity']
+                        position_dict["account_number"] = account_id
+                        position_dict["average_price"] = position["averagePrice"]
+                        position_dict["market_value"] = position["marketValue"]
+                        position_dict["current_day_profit_loss_percentage"] = position[
+                            "currentDayProfitLossPercentage"
+                        ]
+                        position_dict["current_day_profit_loss"] = position[
+                            "currentDayProfitLoss"
+                        ]
+                        position_dict["long_quantity"] = position["longQuantity"]
+                        position_dict["short_quantity"] = position["shortQuantity"]
+                        position_dict["settled_long_quantity"] = position[
+                            "settledLongQuantity"
+                        ]
+                        position_dict["settled_short_quantity"] = position[
+                            "settledShortQuantity"
+                        ]
 
-                        position_dict['symbol'] = position['instrument']['symbol']
-                        position_dict['cusip'] = position['instrument']['cusip']
-                        position_dict['asset_type'] = position['instrument']['assetType']
-                        position_dict['sub_asset_type'] = position['instrument'].get(
-                            'subAssetType', ""
+                        position_dict["symbol"] = position["instrument"]["symbol"]
+                        position_dict["cusip"] = position["instrument"]["cusip"]
+                        position_dict["asset_type"] = position["instrument"][
+                            "assetType"
+                        ]
+                        position_dict["sub_asset_type"] = position["instrument"].get(
+                            "subAssetType", ""
                         )
-                        position_dict['description'] = position['instrument'].get(
-                            'description', ""
+                        position_dict["description"] = position["instrument"].get(
+                            "description", ""
                         )
-                        position_dict['type'] = position['instrument'].get(
-                            'type', ""
-                        )
+                        position_dict["type"] = position["instrument"].get("type", "")
 
                         positions_lists.append(position_dict)
 
