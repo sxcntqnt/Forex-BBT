@@ -1,7 +1,6 @@
 import asyncio
 import logging
-
-import json
+import json , re
 import time as time_true
 import pathlib
 import pandas as pd
@@ -49,15 +48,14 @@ class ForexBot:
         self._bar_type = None
         self.config = Config()
         self.api = DerivAPI(connection=connection)
-
+        self.args = {}
+       
         # Initialize DataManager with the appropriate symbols
         self.data_manager: DataManager = DataManager(config, [], config.SYMBOLS)
 
         self.strategy_manager = StrategyManager(self.data_manager, config)
         self.risk_manager = RiskManager(config)
-        self.backtester = Backtester(
-            config, self.api, self.data_manager, self.strategy_manager
-        )
+        self.backtester = Backtester(config, self.api, self.data_manager, self.strategy_manager)
         self.monitor = Monitor(config, self.backtester)
         self.portfolio_manager = PortfolioManager(config)
         self.performance_monitor = PerformanceMonitor()
@@ -158,13 +156,24 @@ class ForexBot:
 
     async def initialize_data_manager(self, config, api):
         """Initialize the DataManager with historical data."""
-        start_date = datetime.now() - timedelta(days=config.HISTORICAL_DAYS)
-        end_date = datetime.now()
+        start_date = datetime.today()
+        end_date = start_date - timedelta(days=config.HISTORICAL_DAYS)
         historical_data = []
 
+        # Assuming config.TIMEFRAME is the bar_type and a default bar_size is defined
+        bar_size = (
+            config.BAR_SIZE if hasattr(config, "BAR_SIZE") else 1
+        )  # Default to 1 if not specified
+        bar_type = config.TIMEFRAME  # Assuming TIMEFRAME is the bar_type
+
         for symbol in config.SYMBOLS:
+            # Call the grab_historical_prices method with the correct arguments
             data = await self.grab_historical_prices(
-                start_date, end_date, config.TIMEFRAME, symbol
+                start_date,
+                end_date,
+                bar_size,
+                bar_type,
+                [symbol],  # Pass the symbol as a list
             )
             historical_data.extend(data)
 
@@ -541,6 +550,15 @@ class ForexBot:
 
     @staticmethod
     def milliseconds_since_epoch(dt):
+        """
+        Converts a datetime object to milliseconds since epoch.
+        
+        Args:
+            dt (datetime): Datetime object to convert
+            
+        Returns:
+            int: Milliseconds since epoch
+        """
         return int(dt.timestamp() * 1000)
 
     async def grab_historical_prices(
@@ -550,9 +568,10 @@ class ForexBot:
         bar_size: int = 1,
         bar_type: str = "minute",
         symbols: List[str] = None,
-    ) -> List[dict]:
-        """Grabs the historical prices for all the postions in a portfolio.
-
+    ) -> Dict[str, Union[List[Dict], Dict]]:
+        """
+        Grabs historical prices for all positions in a portfolio.
+        
         Overview:
         ----
         Any of the historical price data returned will include extended hours
@@ -569,7 +588,8 @@ class ForexBot:
 
         Returns:
         ----
-            List[Dict] -- The historical price candles.
+            Dict[str, Union[List[Dict], Dict]] -- Dictionary containing candles for each symbol
+                and aggregated data.
 
         Usage:
         ----
@@ -580,87 +600,99 @@ class ForexBot:
                 )
             >>> start_date = datetime.today()
             >>> end_date = start_date - timedelta(days=30)
-            >>> historical_prices = trading_robot.grab_historical_prices(
+            >>> historical_prices = await trading_robot.grab_historical_prices(
                     start=end_date,
                     end=start_date,
                     bar_size=1,
                     bar_type='minute'
                 )
         """
-
-        print(
-            f"Inside grab_historical_prices - start_date type: {type(start_date)}, value: {start_date}"
-        )
-        print(
-            f"Inside grab_historical_prices - end_date type: {type(end_date)}, value: {end_date}"
-        )
-
-
-        self._bar_size = bar_size
-        self._bar_type = bar_type
-
-        # Convert to epoch timestamps
-        start_timestamp = self.milliseconds_since_epoch(start_date) // 1000
-        end_timestamp = self.milliseconds_since_epoch(end_date) // 1000
-
-        print(f"DEBUG: start_timestamp = {start_timestamp}, end_timestamp = {end_timestamp}")
-
-        if not start_timestamp or not end_timestamp:
-            raise ValueError("Invalid timestamps calculated")
-
+        
+        # Input validation
+        if not isinstance(symbols, list) and symbols is not None:
+            raise ValueError("Symbols must be a list")
+            
         if not symbols:
             symbols = self.portfolio_manager.positions
-
-        print(f"DEBUG: symbols = {symbols}")
-
+            
         if not symbols:
             raise ValueError("No symbols provided for historical data retrieval.")
-
+            
         if self.api is None:
             raise ValueError("API instance is not initialized!")
+            
+        print(f"DEBUG: Processing {len(symbols)} symbols")
 
+        # Convert dates to timestamps
+        start_timestamp = self.milliseconds_since_epoch(start_date) // 1000
+        end_timestamp = self.milliseconds_since_epoch(end_date) // 1000
+        
+        print(f"DEBUG: Timestamp range - start: {start_timestamp}, end: {end_timestamp}")
+        
+        if not start_timestamp or not end_timestamp:
+            raise ValueError("Invalid timestamps calculated")
+            
         new_prices = []
-
+        historical_data = {}
+        
         for symbol in symbols:
-            args = {
-                "symbol": symbol,
+            # Clean symbol format
+            clean_symbol = symbol.replace('frx', '')
+            
+            # Verify symbol format
+            if not re.match(r'^[a-zA-Z]{2,30}$', clean_symbol):
+                print(f"Skipping invalid symbol: {symbol}")
+                continue
+            
+            self.args = {
+                "symbol": clean_symbol,
                 "start": int(start_timestamp),
                 "end": int(end_timestamp),
-                "granularity": 300,  # Must be one of the allowed values
-                "style": "candles",  # Use 'candles' for OHLC data
-                "count": 5000,  # Fetch more data if needed
-                "adjust_start_time": 1,  # Adjust interval if the market is closed
+                "granularity": 300,
+                "style": "candles",
+                "count": 5000,
+                "adjust_start_time": 1
             }
-
-            print(f"DEBUG: Arguments for ticks_history: {args}")
-
-            # Call API and validate response
-            historical_prices_response = await self.api.ticks_history(args)
-
-            if historical_prices_response is None:
-                raise ValueError(f"API returned None for {symbol}")
-
-            if "candles" not in historical_prices_response:
-                raise ValueError(f"Invalid response: {historical_prices_response}")
-
-            self.historical_prices[symbol] = {"candles": historical_prices_response["candles"]}
-
-            for candle in historical_prices_response["candles"]:
-                new_price_mini_dict = {
-                    "symbol": symbol,
-                    "open": candle["open"],
-                    "close": candle["close"],
-                    "high": candle["high"],
-                    "low": candle["low"],
-                    "volume": candle["volume"],
-                    "datetime": candle["epoch"],  # Use 'epoch' instead of 'datetime' if needed
+            
+            print(f"DEBUG: Arguments for ticks_history: {self.args}")
+            
+            try:
+                historical_prices_response = await self.api.ticks_history(self.args)
+                
+                if historical_prices_response is None:
+                    print(f"No data returned for {symbol}")
+                    continue
+                    
+                if "candles" not in historical_prices_response:
+                    print(f"Invalid response structure for {symbol}")
+                    continue
+                    
+                # Store candles for individual symbol
+                historical_data[symbol] = {
+                    "candles": historical_prices_response["candles"]
                 }
-                new_prices.append(new_price_mini_dict)
-
-        self.historical_prices["aggregated"] = new_prices
-
-        return self.historical_prices
-
+                
+                # Process candles for aggregation
+                for candle in historical_prices_response["candles"]:
+                    new_price_mini_dict = {
+                        "symbol": symbol,
+                        "open": candle["open"],
+                        "close": candle["close"],
+                        "high": candle["high"],
+                        "low": candle["low"],
+                        "volume": candle["volume"],
+                        "datetime": candle["epoch"]
+                    }
+                    new_prices.append(new_price_mini_dict)
+                    
+            except Exception as e:
+                print(f"Error fetching data for {symbol}: {str(e)}")
+                continue
+            
+        # Add aggregated prices
+        historical_data["aggregated"] = new_prices
+        
+        return historical_data
     def get_latest_bar(self) -> List[dict]:
         """Returns the latest bar for each symbol in the portfolio.
 
