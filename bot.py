@@ -16,6 +16,7 @@ from typing import Union
 from deriv_api import DerivAPI
 from rx import Observable
 from config import Config
+from configparser import ConfigParser
 from strategy import StrategyManager
 from risk_manager import RiskManager
 from monitor import Monitor
@@ -51,7 +52,7 @@ class ForexBot:
         self.args = {}
        
         # Initialize DataManager with the appropriate symbols
-        self.data_manager: DataManager = DataManager(config, [], config.SYMBOLS)
+        self.data_manager: DataManager = DataManager(config)
 
         self.strategy_manager = StrategyManager(self.data_manager, config)
         self.risk_manager = RiskManager(config)
@@ -334,7 +335,7 @@ class ForexBot:
         self.portfolio = Portfolio(account_number=self.trading_account)
 
         # Assign the Client
-        self.portfolio.td_client = self.session
+        self.portfolio.td_client = self.api
 
         return self.portfolio
 
@@ -437,7 +438,7 @@ class ForexBot:
 
         # Set the Client.
         trade.account = self.trading_account
-        trade._td_client = self.session
+        trade._td_client = self.api
 
         self.trades[trade_id] = trade
 
@@ -544,7 +545,7 @@ class ForexBot:
         symbols = self.portfolio.positions.keys()
 
         # Grab the quotes.
-        quotes = self.session.get_quotes(instruments=list(symbols))
+        quotes = self.api.get_quotes(instruments=list(symbols))
 
         return quotes
 
@@ -561,6 +562,7 @@ class ForexBot:
         """
         return int(dt.timestamp() * 1000)
 
+
     async def grab_historical_prices(
         self,
         start_date: datetime,
@@ -571,79 +573,44 @@ class ForexBot:
     ) -> Dict[str, Union[List[Dict], Dict]]:
         """
         Grabs historical prices for all positions in a portfolio.
-        
-        Overview:
-        ----
-        Any of the historical price data returned will include extended hours
-        price data by default.
-
-        Arguments:
-        ----
-            start_date {datetime} -- Defines the start date for the historical prices.
-            end_date {datetime} -- Defines the end date for the historical prices.
-            bar_size {int} -- Defines the size of each bar. (default: {1})
-            bar_type {str} -- Defines the bar type, can be one of the following:
-                ['minute', 'week', 'month', 'year'] (default: {'minute'})
-            symbols {List[str]} -- A list of ticker symbols to pull. (default: None)
-
-        Returns:
-        ----
-            Dict[str, Union[List[Dict], Dict]] -- Dictionary containing candles for each symbol
-                and aggregated data.
-
-        Usage:
-        ----
-            >>> trading_robot = PyRobot(
-                    client_id=CLIENT_ID,
-                    redirect_uri=REDIRECT_URI,
-                    credentials_path=CREDENTIALS_PATH
-                )
-            >>> start_date = datetime.today()
-            >>> end_date = start_date - timedelta(days=30)
-            >>> historical_prices = await trading_robot.grab_historical_prices(
-                    start=end_date,
-                    end=start_date,
-                    bar_size=1,
-                    bar_type='minute'
-                )
+        Arguments and functionality explained in the docstring above.
         """
-        
         # Input validation
         if not isinstance(symbols, list) and symbols is not None:
             raise ValueError("Symbols must be a list")
-            
+
         if not symbols:
-            symbols = self.portfolio_manager.positions
-            
+            symbols = self.portfolio_manager.positions  # Assuming this is predefined
+
         if not symbols:
             raise ValueError("No symbols provided for historical data retrieval.")
-            
+
         if self.api is None:
             raise ValueError("API instance is not initialized!")
-            
+
         print(f"DEBUG: Processing {len(symbols)} symbols")
 
         # Convert dates to timestamps
         start_timestamp = self.milliseconds_since_epoch(start_date) // 1000
         end_timestamp = self.milliseconds_since_epoch(end_date) // 1000
-        
+
         print(f"DEBUG: Timestamp range - start: {start_timestamp}, end: {end_timestamp}")
-        
+
         if not start_timestamp or not end_timestamp:
             raise ValueError("Invalid timestamps calculated")
-            
-        new_prices = []
-        historical_data = {}
-        
+
+        new_prices = []  # For storing all price data
+        historical_data = {}  # For symbol-specific historical data
+
         for symbol in symbols:
-            # Clean symbol format
+            # Clean symbol format (e.g., remove 'frx' or any unwanted parts)
             clean_symbol = symbol.replace('frx', '')
-            
-            # Verify symbol format
+
+            # Verify symbol format (basic check)
             if not re.match(r'^[a-zA-Z]{2,30}$', clean_symbol):
                 print(f"Skipping invalid symbol: {symbol}")
                 continue
-            
+
             self.args = {
                 "symbol": clean_symbol,
                 "start": int(start_timestamp),
@@ -653,26 +620,27 @@ class ForexBot:
                 "count": 5000,
                 "adjust_start_time": 1
             }
-            
+
             print(f"DEBUG: Arguments for ticks_history: {self.args}")
-            
+
             try:
+                # Fetch historical prices using the API
                 historical_prices_response = await self.api.ticks_history(self.args)
-                
+
                 if historical_prices_response is None:
                     print(f"No data returned for {symbol}")
                     continue
-                    
+
                 if "candles" not in historical_prices_response:
                     print(f"Invalid response structure for {symbol}")
                     continue
-                    
+
                 # Store candles for individual symbol
                 historical_data[symbol] = {
                     "candles": historical_prices_response["candles"]
                 }
-                
-                # Process candles for aggregation
+
+                # Process candles and aggregate into new_prices list
                 for candle in historical_prices_response["candles"]:
                     new_price_mini_dict = {
                         "symbol": symbol,
@@ -684,15 +652,18 @@ class ForexBot:
                         "datetime": candle["epoch"]
                     }
                     new_prices.append(new_price_mini_dict)
-                    
+
             except Exception as e:
                 print(f"Error fetching data for {symbol}: {str(e)}")
                 continue
-            
-        # Add aggregated prices
+
+        # Add aggregated prices to the historical data
         historical_data["aggregated"] = new_prices
-        
+
+        # Return the historical data for all symbols and the aggregated data
         return historical_data
+
+
     def get_latest_bar(self) -> List[dict]:
         """Returns the latest bar for each symbol in the portfolio.
 
@@ -729,7 +700,7 @@ class ForexBot:
             try:
 
                 # Grab the request.
-                historical_prices_response = self.session.get_price_history(
+                historical_prices_response = self.api.get_price_history(
                     symbol=symbol,
                     period_type="day",
                     start_date=start,
@@ -744,7 +715,7 @@ class ForexBot:
                 time_true.sleep(2)
 
                 # Grab the request.
-                historical_prices_response = self.session.get_price_history(
+                historical_prices_response = self.api.get_price_history(
                     symbol=symbol,
                     period_type="day",
                     start_date=start,
@@ -979,7 +950,7 @@ class ForexBot:
         """
 
         # Execute the order.
-        order_dict = self.session.place_order(
+        order_dict = self.api.place_order(
             account=self.trading_account, order=trade_obj.order
         )
 
@@ -1092,7 +1063,7 @@ class ForexBot:
             account = account_number
 
         # Grab the accounts.
-        accounts = self.session.get_accounts(account=account)
+        accounts = self.api.get_accounts(account=account)
 
         # Parse the account info.
         accounts_parsed = self._parse_account_balances(accounts_response=accounts)
@@ -1303,7 +1274,7 @@ class ForexBot:
             account = account_number
 
         # Grab the positions.
-        positions = self.session.get_accounts(account=account, fields=["positions"])
+        positions = self.api.get_accounts(account=account, fields=["positions"])
 
         # Parse the positions.
         positions_parsed = self._parse_account_positions(positions_response=positions)

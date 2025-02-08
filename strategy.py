@@ -44,7 +44,7 @@ class StrategyManager:
         """
 
         self._stock_frame: DataManager = price_dataframe
-        self._price_groups = price_dataframe._symbol_groups
+        self._price_groups = price_dataframe.symbol_groups
         self._current_indicators = {}
         self._indicator_signals = {}
         self._frame = self._stock_frame._frame

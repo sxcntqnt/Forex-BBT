@@ -1,4 +1,6 @@
 import pandas as pd
+from config import Config
+from configparser import ConfigParser
 from datetime import datetime
 from datetime import timezone
 from datetime import timedelta
@@ -8,19 +10,19 @@ from pandas.core.window import RollingGroupby
 
 
 class DataManager:
-    def __init__(self, config, data: List[Dict], symbols: List[str]) -> None:
+    def __init__(self, config: Config, max_data_points: int = 100000) -> None:
         """Initializes the Stock Data Manager.
 
         Args:
-            config: Configuration object (not used in this snippet).
-            data (List[Dict]): The data to convert to a DataFrame. Normally,
-                this is returned from the historical prices endpoint.
-            symbols (List[str]): List of symbols to track.
+            config: Configuration object.
+            max_data_points (int): Maximum number of data points to store for each symbol.
         """
-        self._data = data
-        self._frame: pd.DataFrame = self.create_frame()  # Create the DataFrame
+        self._data = {}  # Stores data for each symbol
+        self._ws_connections = {}  # WebSocket connections for each symbol
+        self._frame: pd.DataFrame = pd.DataFrame()  # Create the DataFrame
         self._symbol_groups: DataFrameGroupBy = None
         self._symbol_rolling_groups: RollingGroupby = None
+        
         # Initialize symbols with empty DataFrames
         self.symbols = {
             symbol: pd.DataFrame(
@@ -35,85 +37,104 @@ class DataManager:
                     "quote",
                 ]
             )
-            for symbol in symbols
+            for symbol in config.SYMBOLS  # Use symbols from config
         }
-        self.max_data_points = 1000
 
-    def create_frame(self) -> pd.DataFrame:
-        """Creates a DataFrame from the initial data."""
-        if not self._data:  # If there's no data, return an empty DataFrame
-            return pd.DataFrame(
-                columns=[
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "bid",
-                    "ask",
-                    "quote",
-                ]
+        self.max_data_points = max_data_points  # Use the provided max_data_points
+
+    def create_subs_cb(self, symbol: str) -> callable:
+        """Generates a callback function for each symbol to handle real-time updates."""
+        def callback(data):
+            if "tick" in data:
+                tick = data
+                self.update(symbol, tick)
+            else:
+                print(f"No tick data for symbol {symbol}")
+
+        return callback
+
+    async def subscribe(self, symbol: str, ws_url: str) -> None:
+        """Subscribe to a WebSocket data stream for a given symbol."""
+        async with websockets.connect(ws_url) as ws:
+            self._ws_connections[symbol] = ws
+            subscribe_message = {
+                "type": "subscribe",
+                "symbol": symbol
+            }
+
+            # Send the subscription request
+            await ws.send(str(subscribe_message))
+
+            while True:
+                response = await ws.recv()
+                if response:
+                    # Assuming the response is in JSON format
+                    data = eval(response)  # For simplicity, converting to dict
+                    callback = self.create_subs_cb(symbol)
+                    callback(data)
+
+    async def start_subscriptions(self, ws_url: str) -> None:
+        """Start WebSocket subscriptions for all symbols."""
+        if not self.symbols:
+            print("No symbols to subscribe to.")
+            return
+
+        tasks = []
+        for symbol in self.symbols:
+            tasks.append(self.subscribe(symbol, ws_url))
+
+        if tasks:
+            try:
+                await asyncio.gather(*tasks)
+            except Exception as e:
+                print(f"Error during subscription: {e}")
+
+
+    async def stop_subscriptions(self) -> None:
+        """Stop all WebSocket subscriptions."""
+        for ws in self._ws_connections.values():
+            await ws.close()
+        self._ws_connections.clear()
+
+    async def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
+        """Update the DataFrame for the specified symbol with new tick data."""
+        try:
+            epoch = tick["tick"]["epoch"]
+            ask = tick["tick"]["ask"]
+            bid = tick["tick"]["bid"]
+            quote = tick["tick"]["quote"]
+
+            new_data = pd.DataFrame(
+                {
+                    "timestamp": [epoch],
+                    "open": [bid],
+                    "high": [ask],
+                    "low": [bid],
+                    "close": [bid],
+                    "bid": [bid],
+                    "ask": [ask],
+                    "quote": [quote],
+                }
             )
 
-        price_df = pd.DataFrame(data=self._data)
-        price_df = self._parse_datetime_column(price_df=price_df)
-        price_df = self._set_multi_index(price_df=price_df)
-
-        return price_df
-
-    def _parse_datetime_column(self, price_df: pd.DataFrame) -> pd.DataFrame:
-        """Parses the datetime column passed through."""
-        price_df["datetime"] = pd.to_datetime(
-            price_df["epoch"], unit="s", origin="unix"
-        )
-        return price_df
-
-
-async def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
-    """Updates the DataFrame for the specified symbol with new tick data.
-
-    Args:
-        symbol (str): The stock symbol to update.
-        tick (Dict[str, Union[int, float]]): New tick data containing
-            'epoch' for timestamp and 'quote' for price.
-    """
-    epoch = tick["tick"]["epoch"]
-    ask = tick["tick"]["ask"]
-    bid = tick["tick"]["bid"]
-    quote = tick["tick"]["quote"]
-
-    # Create a new row of data
-    new_data = pd.DataFrame(
-        {
-            "timestamp": [epoch],
-            "open": [bid],  # Set open to the current bid price
-            "high": [ask],  # Set high to the current ask price
-            "low": [bid],  # Set low to the current bid price
-            "close": [bid],  # Set close to the current bid price
-            "bid": [bid],  # Store the bid price
-            "ask": [ask],  # Store the ask price
-            "quote": [quote],  # Store the quote price
-        }
-    )
-
-    # Update the DataFrame for the given symbol
-    if symbol in self.symbols:
-        if self.symbols[symbol].empty:
-            self.symbols[symbol] = new_data
-        else:
-            last_row = self.symbols[symbol].iloc[-1]
-
-            if last_row["timestamp"] == epoch:
-                last_row["close"] = bid
-                last_row["high"] = max(last_row["high"], ask)
-                last_row["low"] = min(last_row["low"], bid)
-                self.symbols[symbol].iloc[-1] = last_row
+            if symbol in self.symbols:
+                if self.symbols[symbol].empty:
+                    self.symbols[symbol] = new_data
+                else:
+                    last_row = self.symbols[symbol].iloc[-1]
+                    if last_row["timestamp"] == epoch:
+                        last_row["close"] = bid
+                        last_row["high"] = max(last_row["high"], ask)
+                        last_row["low"] = min(last_row["low"], bid)
+                        self.symbols[symbol].iloc[-1] = last_row
+                    else:
+                        self.symbols[symbol] = pd.concat([self.symbols[symbol], new_data]).tail(self._max_data_points)
             else:
-                self.symbols[symbol] = pd.concat([self.symbols[symbol], new_data]).tail(
-                    self.max_data_points
-                )
-    else:
-        print(f"Symbol {symbol} not found in managed symbols.")
+                print(f"Symbol {symbol} not found in managed symbols.")
+        except KeyError as e:
+            print(f"KeyError: Missing expected key in tick data - {e}")
+        except Exception as e:
+            print(f"Error updating symbol {symbol}: {e}")
 
     def get_close_prices(self, symbol: str) -> List[float]:
         """Retrieves the close prices for the specified symbol."""
@@ -213,22 +234,11 @@ async def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
             self._frame.loc[row_id] = new_row.values
             self._frame.sort_index(inplace=True)
 
+
+
     def do_indicator_exist(self, column_names: List[str]) -> bool:
-        """Checks to see if the indicator columns specified exist.
-
-        Arguments:
-        ----
-        column_names {List[str]} -- A list of column names that will be checked.
-
-        Raises:
-        ----
-        KeyError: If a column is not found in the StockFrame, a KeyError will be raised.
-
-        Returns:
-        ----
-        bool -- `True` if all the columns exist.
-        """
-        missing_columns = set(column_names).difference(self._frame.columns)
+        """Checks to see if the indicator columns specified exist."""
+        missing_columns = set(column_names).difference(self.symbols.columns)
         if not missing_columns:
             return True
         else:
@@ -242,33 +252,15 @@ async def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
         indicators_comp_key: List[str],
         indicators_key: List[str],
     ) -> Union[pd.DataFrame, None]:
-        """Returns the last row of the StockFrame if conditions are met.
-
-        Arguments:
-        ----
-        indicators {dict} -- A dictionary containing all the indicators to be checked.
-        indicators_comp_key {List[str]} -- Indicators where we compare one indicator to another.
-        indicators_key {List[str]} -- Indicators where we compare one indicator to a numerical value.
-
-        Returns:
-        ----
-        {Union[pd.DataFrame, None]} -- If signals are generated, a pandas DataFrame is returned; else None.
-        """
-        # Grab the last rows.
-        last_rows = self.symbol_groups.tail(1)
-
-        # Define a list of conditions.
+        """Returns the last row of the StockFrame if conditions are met."""
+        last_rows = self.symbols.tail(1)
         conditions = {}
 
-        # Check if all columns exist.
         if self.do_indicator_exist(column_names=indicators_key):
             for indicator in indicators_key:
                 column = last_rows[indicator]
-
-                # Grab Buy & Sell Conditions.
                 buy_condition_target = indicators[indicator]["buy"]
                 sell_condition_target = indicators[indicator]["sell"]
-
                 buy_condition_operator = indicators[indicator]["buy_operator"]
                 sell_condition_operator = indicators[indicator]["sell_operator"]
 
@@ -278,10 +270,7 @@ async def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
                 conditions["buys"] = condition_1.where(lambda x: x).dropna()
                 conditions["sells"] = condition_2.where(lambda x: x).dropna()
 
-        # Store the indicators in a list.
         check_indicators = []
-
-        # Split names to check if indicators exist.
         for indicator in indicators_comp_key:
             check_indicators.extend(indicator.split("_comp_"))
 
@@ -291,13 +280,11 @@ async def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
                 indicator_1 = last_rows[parts[0]]
                 indicator_2 = last_rows[parts[1]]
 
-                # If buy operator exists.
                 if indicators[indicator].get("buy_operator"):
                     buy_condition_operator = indicators[indicator]["buy_operator"]
                     condition_1 = buy_condition_operator(indicator_1, indicator_2)
                     conditions["buys"] = condition_1.where(lambda x: x).dropna()
 
-                # If sell operator exists.
                 if indicators[indicator].get("sell_operator"):
                     sell_condition_operator = indicators[indicator]["sell_operator"]
                     condition_2 = sell_condition_operator(indicator_1, indicator_2)
@@ -306,67 +293,28 @@ async def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
         return pd.DataFrame(conditions) if conditions else None
 
     def grab_n_bars_ago(self, symbol: str, n: int) -> pd.Series:
-        """Grabs the trading bar `n` bars ago.
-
-        Arguments:
-        ----
-        symbol : str -- The symbol to grab the bar for.
-        n : int -- The number of bars to look back.
-
-        Returns:
-        ----
-        pd.Series -- A candle bar represented as a pandas series object.
-        """
-        bars_filtered = self._frame.filter(like=symbol, axis=0)
+        """Grabs the trading bar n bars ago."""
+        bars_filtered = self.symbols.filter(like=symbol, axis=0)
         return bars_filtered.iloc[-n]
 
     def calculate_indicators(self, symbol: str, indicators: Dict[str, Dict]) -> None:
-        """Calculates and adds specified indicators to the stock data frame.
-
-        Arguments:
-        ----
-        symbol : str -- The symbol for which to calculate indicators.
-        indicators : Dict[str, Dict] -- A dictionary of indicators and their parameters.
-        """
-        df = self.get_ohlc_data(symbol)
+        """Calculates and adds specified indicators to the stock data frame."""
+        df = self.get_data(symbol)
         for indicator, params in indicators.items():
             if indicator == "SMA":
                 window = params.get("window", 14)
                 df[f"{indicator}_{window}"] = df["close"].rolling(window=window).mean()
             elif indicator == "EMA":
                 span = params.get("span", 14)
-                df[f"{indicator}_{span}"] = (
-                    df["close"].ewm(span=span, adjust=False).mean()
-                )
+                df[f"{indicator}_{span}"] = df["close"].ewm(span=span, adjust=False).mean()
             # Add more indicators as needed
-        self.data[symbol] = df
+        self.symbols[symbol] = df
 
     def reset_data(self) -> None:
         """Resets the internal data structures, clearing all stored information."""
-        self.data = {
-            symbol: pd.DataFrame(columns=["timestamp", "open", "high", "low", "close"])
+        self.symbols = {
+            symbol: pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "bid", "ask", "quote"])
             for symbol in self.symbols
         }
-        self._frame = self.create_frame()
-        self._symbol_groups = None
-        self._symbol_rolling_groups = None
+        self._data.clear()
 
-    def get_all_symbols_data(self) -> Dict[str, pd.DataFrame]:
-        """Retrieves OHLC data for all tracked symbols.
-
-        Returns:
-        ----
-        Dict[str, pd.DataFrame] -- A dictionary of DataFrames indexed by symbol.
-        """
-        return self._data
-
-
-def create_subs_cb(data_manager: DataManager, symbol: str):
-    def cb(data):
-        if "tick" in data:
-            tick = data  # The entire data dictionary is passed
-            data_manager.update(symbol, tick)
-        else:
-            print(f"No tick data for symbol {symbol}")
-
-    return cb

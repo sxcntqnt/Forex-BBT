@@ -1,26 +1,30 @@
 import os, time, sys
-from dotenv import load_dotenv
+import configparser
+from configparser import ConfigParser
 
 class Config:
-    def __init__(self):
-        load_dotenv()  # Load environment variables from .env file
-        
+    def __init__(self, config_file='config/config.ini'):
+        # Load configuration from the ini file
+        self.config = ConfigParser()
+        self.config.read(config_file)
+
         # Check for APP_ID after loading environment variables
-        if os.getenv("APP_ID") is None or len(os.getenv("APP_ID")) == 0:
+        if not self.config['DEFAULT'].get("APP_ID"):
             print("APP_ID environment variable is not set")
             time.sleep(2)
             sys.exit('Exiting...')
 
+
         # Load other configuration variables
-        self.API_TOKEN = os.getenv('DERIV_API_TOKEN')
-        self.EndPoint = f'wss://ws.derivws.com/websockets/v3?app_id={os.getenv("APP_ID")}'
-        self.SYMBOLS = ['frxAUDCAD'] #, 'frxAUDCHF', 'frxAUDJPY', 'frxAUDNZD', 'frxAUDUSD', 'frxEURAUD', 'frxEURCAD', 'frxEURCHF', 'frxEURGBP', 'frxEURJPY', 'frxEURNZD', 'frxEURUSD', 'frxGBPAUD', 'frxGBPCAD', 'frxGBPCHF', 'frxGBPJPY', 'frxGBPUSD', 'frxNZDUSD', 'frxUSDCAD', 'frxUSDCHF', 'frxUSDJPY', 'frxUSDMXN', 'frxUSDNOK', 'frxUSDPLN', 'frxUSDSEK', 'frxXAGUSD', 'frxXAUUSD', 'frxXPDUSD', 'frxXPTUSD']
-        self.TIMEFRAME = '5m'
-        self.RISK_PERCENTAGE = 0.01
-        self.MAX_TRADES_PER_SYMBOL = 2
-        self.STOP_LOSS_PIPS = 20
-        self.TAKE_PROFIT_PIPS = 40
-        self.TRAILING_STOP_PIPS = 15
-        self.HISTORICAL_DAYS = 30  # Fetch data for the last 30 days
-        self.BACKTEST_START_DATE = '2023-01-01'
-        self.BACKTEST_END_DATE = '2023-06-30'
+        self.API_TOKEN = self.config['DEFAULT'].get('DERIV_API_TOKEN')
+        self.EndPoint = self.config['DEFAULT'].get('EndPoint')
+        self.SYMBOLS = self.config['Settings'].get('SYMBOLS')
+        self.TIMEFRAME = self.config['Settings'].get('TIMEFRAME')
+        self.RISK_PERCENTAGE = self.config['Settings'].getfloat('RISK_PERCENTAGE', fallback=0.01)
+        self.MAX_TRADES_PER_SYMBOL = self.config['Settings'].getint('MAX_TRADES_PER_SYMBOL', fallback=2)
+        self.STOP_LOSS_PIPS = self.config['Settings'].getint('STOP_LOSS_PIPS', fallback=20)
+        self.TAKE_PROFIT_PIPS = self.config['Settings'].getint('TAKE_PROFIT_PIPS', fallback=40)
+        self.TRAILING_STOP_PIPS = self.config['Settings'].getint('TRAILING_STOP_PIPS', fallback=15)
+        self.HISTORICAL_DAYS = self.config['Settings'].getint('HISTORICAL_DAYS', fallback=30)
+        self.BACKTEST_START_DATE = self.config['Settings'].get('BACKTEST_START_DATE')
+        self.BACKTEST_END_DATE = self.config['Settings'].get('BACKTEST_END_DATE')
