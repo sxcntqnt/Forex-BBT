@@ -6,7 +6,7 @@ from bot import ForexBot
 from config import Config
 from web_interface import start_web_interface
 from data_manager import DataManager  # Assuming DataManager is in a file named data_manager.py
-
+from strategy import StrategyManager
 async def main():
     # Initialize the configuration
     config = Config()
@@ -25,6 +25,9 @@ async def main():
 
     # Initialize DataManager before starting bot tasks
     data_manager = DataManager(config)
+
+    # Initialize DataManager before starting bot tasks
+    strategy_manager = StrategyManager(config, bot)
 
     # Start subscribing to symbols in DataManager
     subscription_task = asyncio.create_task(data_manager.start_subscriptions(config.EndPoint))

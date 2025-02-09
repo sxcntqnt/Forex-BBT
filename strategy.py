@@ -4,8 +4,8 @@ from typing import Union
 
 import talib
 import numpy as np
+import asyncio
 from data_manager import DataManager
-
 from configparser import ConfigParser
 from datetime import datetime
 from datetime import timedelta
@@ -20,7 +20,7 @@ from typing import Dict
 from typing import Union
 
 class StrategyManager:
-    def __init__(self, price_dataframe: DataManager, config) -> None:
+    def __init__(self, price_dataframe: DataManager, config: Config) -> None:
         """Initializes the Strategy Manager.
 
         Represents an Indicator Object which can be used
@@ -30,29 +30,18 @@ class StrategyManager:
             price_dataframe (DataManager): The price data frame which is used
                 to add indicators to. At a minimum, this data frame must have
                 the following columns: `['timestamp', 'close', 'open', 'high', 'low']`.
-
-        Usage:
-            >>> historical_prices_df = trading_robot.grab_historical_prices(
-                start=start_date,
-                end=end_date,
-                bar_size=1,  
-                bar_type='minute'
-            )
-            >>> price_data_frame = pd.DataFrame(data=historical_prices)
-            >>> strategy_manager = StrategyManager(price_dataframe=price_data_frame)
-            >>> strategy_manager.price_dataframe
         """
-
         self._stock_frame: DataManager = price_dataframe
-        self._price_groups = price_dataframe.symbol_groups
+        self._price_groups = DataManager.symbol_groups
         self._current_indicators = {}
         self._indicator_signals = {}
-        self._frame = self._stock_frame._frame
-        self.config = Config()
+        self._frame = pd.DataFrame
+        self.config = config  # Use the passed config object
         self._indicators_comp_key = []
         self._indicators_key = []
 
         self.data_manager = price_dataframe
+
         self.strategies = [
             RSIStrategy(),
             MACDStrategy(),
@@ -1120,9 +1109,9 @@ class MLStrategy:
         self.trained = False
         self.config = Config()
 
-    def should_enter_trade(self, symbol, data_manager):
+    async def should_enter_trade(self, symbol, data_manager):
         if not self.trained:
-            self.train(data_manager, symbol)  # Pass symbol here
+            await self.train(data_manager, symbol)  # Pass symbol here
 
         features = self.extract_features(symbol, data_manager)
         prediction = self.model.predict([features])[0]
@@ -1130,11 +1119,11 @@ class MLStrategy:
 
         return prediction > current_price * 1.001  # Predict 0.1% increase
 
-    def train(self, data_manager, symbol):
+    async def train(self, data_manager, symbol):
         # Fetch historical data for the symbol
         start_date = datetime.now() - timedelta(days=self.config.HISTORICAL_DAYS)
         end_date = datetime.now()
-        historical_data = grab_historical_prices(symbol, start_date, end_date, self.config.TIMEFRAME)
+        historical_data = await bot.grab_historical_prices(symbol, start_date, end_date, self.config.TIMEFRAME)
 
         # Prepare training data
         X, y = self.prepare_training_data(data_manager, symbol)

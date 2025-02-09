@@ -117,7 +117,7 @@ class ForexBot:
     async def check_trades(self):
         for symbol in self.config.SYMBOLS:
             if self.strategy_manager.should_enter_trade(symbol, self.data_manager):
-                await self.enter_trade(data, symbol)
+                await self.enter_trade(symbol)
 
         await self.monitor.check_open_positions(self.api)
         await self.performance_monitor.update(self.portfolio_manager)
