@@ -1,6 +1,7 @@
 import pandas as pd
 from config import Config
 from configparser import ConfigParser
+import asyncio
 from datetime import datetime
 from datetime import timezone
 from datetime import timedelta
