@@ -4,3 +4,4 @@ __pycache__
 config/config.ini
 autoscan.log
 configure.scan
+bot_debug.log
