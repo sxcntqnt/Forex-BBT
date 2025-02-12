@@ -8,7 +8,7 @@ from pandas.core.window import RollingGroupby
 
 
 class DataManager:
-    def __init__(self, api, config: Config, max_data_points: int = 100000) -> None:
+    def __init__(self, config: Config, api, max_data_points: int = 100000) -> None:
         """Initializes the Stock Data Manager with real-time data from Deriv API.
 
         Args:
@@ -18,7 +18,7 @@ class DataManager:
         """
         self.config = config  # This line was missing
         self.api = api
-        self.symbols = config.SYMBOLS  # Now accessibl
+        self.symbols = config.SYMBOLS  # Now accessible
         self.max_data_points = max_data_points
         self.data_frames = {
             symbol: pd.DataFrame(columns=["symbol","timestamp", "open", "high", "low", "close", "bid", "ask", "quote"])
