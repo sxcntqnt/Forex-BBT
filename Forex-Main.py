@@ -24,13 +24,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Main")
 
-
 async def main():
     """Main function with event loop starvation prevention."""
     tracemalloc.start()
     config = None
     bot = None
     tasks = []
+
 
     try:
         # 1. Initialize configuration
@@ -39,7 +39,8 @@ async def main():
 
         # 2. Initialize the DerivAPI object
         try:
-            api = DerivAPI(endpoint=config.EndPoint, app_id=config.APP_ID)
+            logger.debug("Initializing DerivAPI...")
+            api = DerivAPI(app_id=config.APP_ID)
             logger.debug(
                 "Initialized DerivAPI with endpoint: %s and app_id: %s",
                 config.EndPoint,
@@ -48,7 +49,9 @@ async def main():
         except Exception as e:
             logger.error("Failed to initialize DerivAPI: %s", str(e))
             return
-
+        if api is None:
+            logger.error("API object is not initialized")
+            return
         # 3. Initialize core components
         data_manager = DataManager(config=config, api=api)
         strategy_manager = StrategyManager(data_manager=data_manager, api=api)
@@ -58,7 +61,8 @@ async def main():
             config=config,
             data_manager=data_manager,
             strategy_manager=strategy_manager,
-            api=api,
+            logger=logger,
+	    api=api
         )
 
         # 5. Authorize with timeout

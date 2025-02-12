@@ -20,7 +20,7 @@ from typing import Union
 from MLStrat import MLStrategy
 
 class StrategyManager:
-    def __init__(self, api, data_manager: DataManager):
+    def __init__(self, data_manager: DataManager, api):
         """Initialize with validated DataManager instance"""
         if not isinstance(data_manager, DataManager):
             raise TypeError("Requires initialized DataManager instance")
