@@ -8,7 +8,7 @@ from pandas.core.window import RollingGroupby
 
 
 class DataManager:
-    def __init__(self, connection, config: Config, max_data_points: int = 100000) -> None:
+    def __init__(self, api, config: Config, max_data_points: int = 100000) -> None:
         """Initializes the Stock Data Manager with real-time data from Deriv API.
 
         Args:
@@ -16,13 +16,12 @@ class DataManager:
             config: Configuration object with settings like symbols.
             max_data_points: Max number of data points to store for each symbol.
         """
-        self.connection = connection
         self.config = config  # This line was missing
-        self.api = DerivAPI(connection=connection)
+        self.api = api
         self.symbols = config.SYMBOLS  # Now accessibl
         self.max_data_points = max_data_points
         self.data_frames = {
-            symbol: pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "bid", "ask", "quote"])
+            symbol: pd.DataFrame(columns=["symbol","timestamp", "open", "high", "low", "close", "bid", "ask", "quote"])
             for symbol in self.symbols
         }
         self.subscriptions = {}
@@ -31,12 +30,23 @@ class DataManager:
         self._frame = pd.DataFrame()  # Initialize your main dataframe
     
     @property
-    def symbol_groups(self):
-        return self._symbol_groups
-    
+    def symbol_groups(self) -> DataFrameGroupBy:
+        """Group data by symbol column"""
+        if not self.data_frames:
+            return pd.DataFrame().groupby([])
+
+        # Concatenate all symbol data with 'symbol' column
+        full_df = pd.concat([
+            df.assign(symbol=symbol)  # Explicitly add symbol column
+            for symbol, df in self.data_frames.items()
+        ])
+        
+        return full_df.groupby("symbol", as_index=False)    
+
     @property
     def frame(self):
         return self._frame
+
     def create_subs_cb(self, symbol: str):
         """Generates a callback function for real-time data updates.
 
@@ -57,15 +67,16 @@ class DataManager:
 
         return cb
 
-    async def subscribe_to_ticks(self, symbol: str) -> None:
-        """Subscribes to real-time price updates for a given symbol."""
-        args = {
-            "ticks": symbol,
-            "subscribe": 1,
-            "passthrough": {"symbol": symbol}
-        }
-        source_tick = await self.api.ticks(args)
-        source_tick.subscribe(self.create_subs_cb(symbol))
+
+    async def subscribe_to_ticks(self, symbol):
+        try:
+            print(f"Attempting to subscribe to {symbol}")
+            sub = await self.api.subscribe({'ticks': symbol})
+            print(f"Subscription response for {symbol}: {sub}")
+            self.subscriptions[symbol] = sub.subscribe(self.create_subs_cb(symbol))
+        except Exception as e:
+            logger.error(f"Subscription failed for {symbol}: {str(e)}")
+
 
     async def start_subscriptions(self) -> None:
         """Starts WebSocket subscriptions for all symbols."""
@@ -94,6 +105,7 @@ class DataManager:
             quote = tick["tick"]["quote"]
 
             new_data = pd.DataFrame({
+                "symbol": [symbol],
                 "timestamp": [epoch],
                 "open": [bid],
                 "high": [ask],
@@ -113,12 +125,15 @@ class DataManager:
         except Exception as e:
             print(f"Error updating symbol {symbol}: {e}")
 
-    async def stop_subscriptions(self) -> None:
-        """Stops all WebSocket subscriptions for active symbols."""
-        for symbol in self.symbols:
-            if symbol in self.last_data:
-                await self.api.forget(self.last_data[symbol]['subscription']['id'])
-        await self.api.clear()
+    async def stop_subscriptions(self):
+        """Proper subscription cleanup"""
+        for symbol, sub in self.subscriptions.items():
+            try:
+                await self.api.forget(sub.id)
+            except Exception as e:
+                logger.error(f"Error unsubscribing {symbol}: {str(e)}")
+        self.subscriptions.clear()
+
 
     def get_close_prices(self, symbol: str) -> List[float]:
         """Retrieves the close prices for the specified symbol.

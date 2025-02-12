@@ -12,7 +12,6 @@ from datetime import timedelta
 
 from config import Config
 
-from sklearn.ensemble import RandomForestRegressor
 import pandas as pd
 
 from typing import Any
@@ -21,30 +20,31 @@ from typing import Union
 from MLStrat import MLStrategy
 
 class StrategyManager:
-    def __init__(self, data_manager: DataManager):
+    def __init__(self, api, data_manager: DataManager):
         """Initialize with validated DataManager instance"""
         if not isinstance(data_manager, DataManager):
             raise TypeError("Requires initialized DataManager instance")
 
         # Set core dependencies
+        self.api = api
         self._stock_frame = data_manager  # Changed from price_dataframe to data_manager
         self.data_manager = data_manager
         self.config = data_manager.config
         self.symbols = self.config.SYMBOLS
 
         # Initialize data structures
-        self._price_groups = data_manager.symbol_groups  # Verify this exists in DataManager
+        self._price_groups = data_manager.symbol_groups
         self._current_indicators = {}
         self._indicator_signals = {}
         self._frame = self._stock_frame.frame  # Verify frame exists in DataManager
         self._indicators_comp_key = []
         self._indicators_key = []
-
+        self._frame = pd.concat(data_manager.data_frames.values())
         # Initialize strategies
         self.strategies = [
-            self.RSIStrategy(),
-            self.MACDStrategy(),
-            self.MLStrategy()
+            RSIStrategy(),
+            MACDStrategy(),
+            MLStrategy(self.config)
         ]
     async def should_enter_trade(self, symbol: str) -> bool:
         """Determines if a trade should be entered based on strategies."""

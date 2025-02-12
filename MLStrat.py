@@ -1,64 +1,209 @@
+from sklearn.ensemble import RandomForestRegressor
+import pandas as pd
+import numpy as np
+import talib
+import asyncio
+import joblib
+from statsmodels.tsa.stattools import adfuller, kpss
+from statsmodels.graphics.tsaplots import plot_pacf
+from config import Config
+from typing import Optional, Tuple
+import logging
+import os
+
+logger = logging.getLogger('MLStrategy')
+
 class MLStrategy:
-    def __init__(self):
-        self.model = RandomForestRegressor(n_estimators=100, random_state=42)
+    def __init__(self, config: Config):
+        if not isinstance(config, Config):
+            raise TypeError("Requires valid Config instance")
+            
+        self.config = config
+        self.model = RandomForestRegressor(
+            n_estimators=config.ML_N_ESTIMATORS,
+            max_depth=config.ML_MAX_DEPTH,
+            random_state=config.SEED
+        )
         self.trained = False
-        self.config = Config()
+        self.min_training_samples = config.ML_MIN_SAMPLES
+        self.model_path = os.path.join(config.MODEL_DIR, 'random_forest.joblib')
+        
+        # Ensure model directory exists
+        os.makedirs(config.MODEL_DIR, exist_ok=True)
 
-    async def should_enter_trade(self, symbol, data_manager):
-        if not self.trained:
-            await self.train(data_manager, symbol)  # Pass symbol here
+    async def should_enter_trade(self, symbol: str, data_manager) -> bool:
+        """Evaluate trading signal with robustness checks"""
+        try:
+            if not self._validate_symbol_data(symbol, data_manager):
+                return False
 
-        features = self.extract_features(symbol, data_manager)
-        prediction = self.model.predict([features])[0]
-        current_price = data_manager.get_close_prices(symbol)[-1]
+            if not self.trained and not await self._attempt_training(data_manager, symbol):
+                return False
 
-        return prediction > current_price * 1.001  # Predict 0.1% increase
+            features = self._extract_features_with_validation(symbol, data_manager)
+            if features is None:
+                return False
 
-    async def train(self, data_manager, symbol):
-        # Fetch historical data for the symbol
-        start_date = datetime.now() - timedelta(days=self.config.HISTORICAL_DAYS)
-        end_date = datetime.now()
-        historical_data = await bot.grab_historical_prices(symbol, start_date, end_date, self.config.TIMEFRAME)
+            prediction = self.model.predict([features])[0]
+            current_price = data_manager.get_close_prices(symbol)[-1]
+            
+            return self._validate_prediction(prediction, current_price)
+            
+        except Exception as e:
+            logger.error(f"Prediction error for {symbol}: {str(e)}", exc_info=True)
+            return False
 
-        # Prepare training data
-        X, y = self.prepare_training_data(data_manager, symbol)
-        self.model.fit(X, y)
-        self.trained = True
+    async def _attempt_training(self, data_manager, symbol: str, retries: int = 3) -> bool:
+        """Training with retry logic and validation"""
+        for attempt in range(retries):
+            try:
+                await self.train(data_manager, symbol)
+                if self.trained:
+                    return True
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+            except Exception as e:
+                logger.warning(f"Training attempt {attempt+1} failed: {str(e)}")
+        return False
 
-    def prepare_training_data(self, data_manager, symbol):
+    async def train(self, data_manager, symbol: str) -> None:
+        """Enhanced training method with statistical validation"""
+        try:
+            prices = data_manager.get_close_prices(symbol)
+            
+            # Statistical validation
+            stationarity = self._check_stationarity(prices)
+            significant_lags = self._calculate_pacf(prices)
+            
+            if not stationarity['is_stationary']:
+                prices = self._make_stationary(prices)
+                
+            X, y = self._prepare_training_data(prices, significant_lags)
+            
+            if len(X) < self.min_training_samples:
+                raise ValueError(f"Insufficient training samples: {len(X)}/{self.min_training_samples}")
+                
+            self.model.fit(X, y)
+            self.trained = True
+            joblib.dump(self.model, self.model_path)
+            
+        except Exception as e:
+            self.trained = False
+            logger.error(f"Training failed: {str(e)}", exc_info=True)
+            raise
+
+    def _prepare_training_data(self, prices: list, significant_lags: list) -> Tuple[np.ndarray, np.ndarray]:
+        """Create training data with enhanced features"""
         X, y = [], []
-        prices = data_manager.get_close_prices(symbol)  # Fetch prices for the symbol
+        for i in range(len(prices) - self.config.ML_WINDOW_SIZE - 1):
+            window = prices[i:i+self.config.ML_WINDOW_SIZE]
+            
+            # Stationarity check
+            if self._check_stationarity(window)['is_stationary']:
+                features = self._extract_features(window, significant_lags)
+                target = self._calculate_target(window)
+                X.append(features)
+                y.append(target)
+                
+        return np.array(X), np.array(y)
 
-        # Check if there are enough prices
-        if len(prices) < 11:
-            print(f"Not enough prices for {symbol}: {len(prices)}")
-            raise ValueError("Not enough data to train the model.")
+    def _extract_features_with_validation(self, symbol: str, data_manager):
+        """Feature extraction with validation checks"""
+        try:
+            prices = data_manager.get_close_prices(symbol)
+            if len(prices) < self.config.ML_WINDOW_SIZE:
+                logger.warning(f"Insufficient data for {symbol}: {len(prices)}")
+                return None
+                
+            significant_lags = self._calculate_pacf(prices)
+            return self._extract_features(prices[-self.config.ML_WINDOW_SIZE:], significant_lags)
+            
+        except Exception as e:
+            logger.error(f"Feature extraction failed: {str(e)}", exc_info=True)
+            return None
 
-        for i in range(len(prices) - 11):
-            features = self.extract_features(symbol, data_manager, i)
-            target = (prices[i+10] - prices[i+9]) / prices[i+9]  # Next candle's return
-            X.append(features)
-            y.append(target)
-
-        # Convert to NumPy arrays
-        X, y = np.array(X), np.array(y)
-
-        # Check if X and y are empty
-        if X.size == 0 or y.size == 0:
-            raise ValueError("Not enough data to train the model.")
-
-        return X, y
-    def extract_features(self, symbol, data_manager, offset=0):
-        prices = data_manager.get_close_prices(symbol)[offset:offset + 10]
+    def _extract_features(self, prices: list, significant_lags: list) -> list:
+        """Enhanced feature engineering"""
         returns = np.diff(prices) / prices[:-1]
-        return [
+        price_series = np.array(prices)
+        
+        # Basic features
+        features = [
             np.mean(returns),
             np.std(returns),
-            (prices[-1] - prices[0]) / prices[0],  # 10-period return
-            talib.RSI(np.array(prices), timeperiod=9)[-1],
-            *talib.BBANDS(np.array(prices), timeperiod=5, nbdevup=2, nbdevdn=2)[0]
+            (prices[-1] - prices[0]) / prices[0],  # Window return
+            talib.RSI(price_series, timeperiod=9)[-1],
         ]
+        
+        # Bollinger Bands
+        upper, middle, lower = talib.BBANDS(price_series, timeperiod=5)
+        features.extend([upper[-1], middle[-1], lower[-1]])
+        
+        # PACF features
+        features.extend([prices[-lag] for lag in significant_lags if lag <= len(prices)])
+        
+        return features
 
+    def _check_stationarity(self, series: list) -> dict:
+        """Statistical stationarity checks using ADF and KPSS tests"""
+        adf_result = adfuller(series)
+        kpss_result = kpss(series)
+        
+        return {
+            'is_stationary': adf_result[1] < 0.05 and kpss_result[1] > 0.05,
+            'adf_pvalue': adf_result[1],
+            'kpss_pvalue': kpss_result[1]
+        }
+
+    def _make_stationary(self, series: list, max_diff: int = 2) -> list:
+        """Make series stationary through differencing"""
+        for d in range(1, max_diff+1):
+            diff_series = np.diff(series, n=d)
+            if self._check_stationarity(diff_series)['is_stationary']:
+                return diff_series.tolist()
+        return series
+
+    def _calculate_pacf(self, series: list, nlags: Optional[int] = None) -> list:
+        """Calculate significant partial autocorrelation lags"""
+        nlags = nlags or min(len(series)//2 - 1, 20)
+        pacf_values = plot_pacf(series, lags=nlags, alpha=0.05, method="ywm")
+        significant_lags = [i for i, val in enumerate(pacf_values) if abs(val) > 2/np.sqrt(len(series))]
+        return significant_lags
+
+    def _calculate_target(self, window: list) -> float:
+        """Calculate target variable with smoothing"""
+        future_window = window[self.config.ML_WINDOW_SIZE:]
+        if len(future_window) == 0:
+            return 0
+        return (future_window[-1] - window[-1]) / window[-1]
+
+    def _validate_symbol_data(self, symbol: str, data_manager) -> bool:
+        """Validate data requirements for symbol"""
+        if symbol not in self.config.SYMBOLS:
+            logger.warning(f"Symbol {symbol} not in configured symbols")
+            return False
+            
+        prices = data_manager.get_close_prices(symbol)
+        if len(prices) < self.config.ML_WINDOW_SIZE * 2:
+            logger.warning(f"Insufficient data for {symbol}: {len(prices)}")
+            return False
+            
+        return True
+
+    def _validate_prediction(self, prediction: float, current_price: float) -> bool:
+        """Validate prediction against business rules"""
+        if np.isnan(prediction) or not np.isfinite(prediction):
+            logger.warning("Invalid prediction value")
+            return False
+            
+        threshold = current_price * (1 + self.config.ML_THRESHOLD)
+        return prediction > threshold
+
+    def load_model(self) -> None:
+        """Load pre-trained model from disk"""
+        if os.path.exists(self.model_path):
+            self.model = joblib.load(self.model_path)
+            self.trained = True
+            logger.info("Loaded pre-trained model")
 
 # Strategy Improvement Plan
 

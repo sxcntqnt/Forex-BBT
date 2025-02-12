@@ -33,17 +33,18 @@ class ForexBot:
     def __init__(
         self,
         config: Config,
-        connection: WebSocketClientProtocol,
-        paper_trading: bool = True
+        api,
+        data_manager: DataManager,  # Add this parameter
+        strategy_manager: StrategyManager,  # Add this parameter
+        paper_trading: bool = True,
     ):
         """Central trading bot with dependency injection"""
         self.config = config
-        self.connection = connection
         self.paper_trading = paper_trading
         
         # Core components
-        self.api = DerivAPI(connection=self.connection)
-        self.data_manager = DataManager(connection, config)
+        self.api = api
+        self.data_manager = DataManager(config, api)
         self.strategy = StrategyManager(self.data_manager)
         self.risk_manager = RiskManager(config)
         
