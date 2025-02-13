@@ -8,7 +8,7 @@ from pandas.core.window import RollingGroupby
 
 
 class DataManager:
-    def __init__(self, config: Config, api, max_data_points: int = 100000) -> None:
+    def __init__(self, config: Config, api,logger, max_data_points: int = 100000) -> None:
         """Initializes the Stock Data Manager with real-time data from Deriv API.
 
         Args:
@@ -24,24 +24,12 @@ class DataManager:
             symbol: pd.DataFrame(columns=["symbol","timestamp", "open", "high", "low", "close", "bid", "ask", "quote"])
             for symbol in self.symbols
         }
+        self.logger = logger
         self.subscriptions = {}
         self.last_data = {}
         self._symbol_groups = None  # Initialize appropriately
         self._frame = pd.DataFrame()  # Initialize your main dataframe
     
-    @property
-    def symbol_groups(self) -> DataFrameGroupBy:
-        """Group data by symbol column"""
-        if not self.data_frames:
-            return pd.DataFrame().groupby([])
-
-        # Concatenate all symbol data with 'symbol' column
-        full_df = pd.concat([
-            df.assign(symbol=symbol)  # Explicitly add symbol column
-            for symbol, df in self.data_frames.items()
-        ])
-        
-        return full_df.groupby("symbol", as_index=False)    
 
     @property
     def frame(self):
@@ -69,13 +57,20 @@ class DataManager:
 
 
     async def subscribe_to_ticks(self, symbol):
+        """Subscribe to tick stream for a given symbol."""
         try:
-            print(f"Attempting to subscribe to {symbol}")
-            sub = await self.api.subscribe({'ticks': symbol})
-            print(f"Subscription response for {symbol}: {sub}")
-            self.subscriptions[symbol] = sub.subscribe(self.create_subs_cb(symbol))
+            # Ensure symbol is a string and not empty
+            if not isinstance(symbol, str) or not symbol:
+                self.logger.error(f"Invalid symbol: {symbol}")
+                return
+
+            # Subscribe to the full symbol
+            tick_stream = await self.api.subscribe({"ticks": symbol, "subscribe": 1})
+            self.subscriptions[symbol] = tick_stream
+            tick_stream.subscribe(self.create_subs_cb(symbol))
+            self.logger.info(f"Subscribed to {symbol} tick stream.")
         except Exception as e:
-            logger.error(f"Subscription failed for {symbol}: {str(e)}")
+            self.logger.error(f"Error subscribing to {symbol}: {e}")
 
 
     async def start_subscriptions(self) -> None:

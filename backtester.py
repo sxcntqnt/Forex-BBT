@@ -42,46 +42,12 @@ class Backtester:
         self._triggered_added = False
         self._multi_leg = False
         self._one_cancels_other = False
-        self._td_client: TDClient = None
     
         self.config = config
         self.api = api
         self.strategy_manager = strategy_manager
         self.data_manager = data_manager  # Make sure to pass the DataManager instance
 
-
-class Trade():
-
-    """
-    Object Type:
-    ----
-    `pyrobot.Trade`
-
-    Overview:
-    ----
-    Reprsents the Trade Object which is used to create new trades,
-    add customizations to them, and easily modify existing content.
-    """
-
-    def __init__(self):
-        """Initalizes a new order."""
-
-        self.order = {}
-        self.trade_id = ""
-        self.order_id = ""
-        self.account = ""
-        self.order_status = "NOT_PLACED"
-
-        self.side = ""
-        self.side_opposite = ""
-        self.enter_or_exit = ""
-        self.enter_or_exit_opposite = ""
-
-        self._order_response = {}
-        self._triggered_added = False
-        self._multi_leg = False
-        self._one_cancels_other = False
-        self._td_client: TDClient = None
     
     def to_dict(self) -> dict:
 
@@ -557,7 +523,7 @@ class Trade():
         # We need to basis to calculate off of. Use the price.
         if self.order_type == 'mkt':
 
-            quote = self._td_client.get_quotes(instruments=[self.symbol])
+            quote = self.api.get_quotes(instruments=[self.symbol])
 
             # Have to make a call to Get Quotes.
             price = quote[self.symbol]['lastPrice']
@@ -567,7 +533,7 @@ class Trade():
         
         else:
 
-            quote = self._td_client.get_quotes(instruments=[self.symbol])
+            quote = self.api.get_quotes(instruments=[self.symbol])
 
             # Have to make a call to Get Quotes.
             price = quote[self.symbol]['lastPrice']
@@ -927,7 +893,7 @@ class Trade():
 
         if self.order_id != "":
 
-            order_response = self._td_client.get_orders(
+            order_response = self.api.get_orders(
                 account=self.account,
                 order_id=self.order_id
             )
@@ -959,7 +925,7 @@ class Trade():
         for order in children:
             
             # Get the latest price.
-            quote = self._td_client.get_quotes(instruments=[self.symbol])
+            quote = self.api.get_quotes(instruments=[self.symbol])
             last_price = quote[self.symbol]['lastPrice']
             
             # Update the price.
@@ -992,6 +958,7 @@ class Trade():
         return pd.DataFrame(candles['candles'])
 
     def backtest_symbol(self, symbol, data):
+        """Backtest a single symbol using historical data."""
         balance = 10000
         trades = []
 
@@ -1000,8 +967,8 @@ class Trade():
                 entry_price = data.iloc[i]['close']
                 stop_loss = entry_price - (self.config.STOP_LOSS_PIPS / 10000)
                 take_profit = entry_price + (self.config.TAKE_PROFIT_PIPS / 10000)
-                
-                for j in range(i+1, len(data)):
+
+                for j in range(i + 1, len(data)):
                     current_price = data.iloc[j]['close']
                     if current_price <= stop_loss:
                         profit = (stop_loss - entry_price) * 10000
@@ -1014,3 +981,9 @@ class Trade():
                         balance += profit
                         break
 
+        return {
+            "final_balance": balance,
+            "trades": trades,
+            "total_trades": len(trades),
+            "profit": sum(trades)
+        }

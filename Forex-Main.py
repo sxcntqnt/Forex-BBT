@@ -53,7 +53,7 @@ async def main():
             logger.error("API object is not initialized")
             return
         # 3. Initialize core components
-        data_manager = DataManager(config=config, api=api)
+        data_manager = DataManager(config=config, api=api, logger=logger)
         strategy_manager = StrategyManager(data_manager=data_manager, api=api)
 
         # 4. Create and configure bot

@@ -20,6 +20,8 @@ from rx import Observable
 from config import Config
 from configparser import ConfigParser
 from strategy import StrategyManager
+from portfolio_manager import PortfolioManager
+from backtester import  Backtester
 from risk_manager import RiskManager
 from monitor import Monitor
 from data_manager import DataManager
@@ -47,10 +49,11 @@ class ForexBot:
 
         # Core components
         self.api = api
-        self.data_manager = DataManager(config, api)
+        self.data_manager = DataManager(config, api, logger)
         self.strategy = StrategyManager(data_manager, api)
         self.risk_manager = RiskManager(config)
-        
+        self.portfolio_manager = PortfolioManager(config)
+        self.backtester = Backtester(config, api, data_manager, strategy_manager)
         # State management
         self.active_trades: Dict[str, dict] = {}
         self.running = False
