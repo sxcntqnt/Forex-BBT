@@ -1275,10 +1275,10 @@ class ForexBot:
 
         return DataManager(config, historical_data, config.SYMBOLS)
 
-    def stop(self):
+    def stop(self, api):
         """Stop the bot."""
         self.running = False
-        asyncio.create_task(self.unsubscribe())  # Ensure unsubscription happens asynchronously
+        asyncio.create_task(api.unsubscribe())  # Ensure unsubscription happens asynchronously
         self.logger.info("Stopping the bot...")
 
     async def run_backtest(self):

@@ -14,7 +14,6 @@ from strategy import StrategyManager
 from web_interface import start_web_interface
 
 # Apply nest_asyncio for environments with existing event loops
-nest_asyncio.apply()
 
 # Configure logging
 logging.basicConfig(
@@ -116,7 +115,7 @@ async def main():
 
         # Close resources
         if bot:
-            await bot.stop()
+            await bot.stop(api)
         if api:
             await api.clear()  # Assuming DerivAPI has a close method
 

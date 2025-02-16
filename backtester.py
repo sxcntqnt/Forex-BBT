@@ -10,10 +10,10 @@ from datetime import datetime
 from typing import List
 from typing import Dict
 
-
+from backtesting import Backtest, Strategy
 
 class Backtester:
-    def __init__(self, config, api, data_manager,  strategy_manager):
+    def __init__(self, config, api, data_manager, strategy_manager):
         """
         Object Type:
         ----
@@ -21,12 +21,11 @@ class Backtester:
 
         Overview:
         ----
-        Reprsents the Trade Object which is used to create new trades,
+        Represents the Trade Object which is used to create new trades,
         add customizations to them, and easily modify existing content.
         """
-
-        """Initalizes a new order."""
-
+        
+        """Initializes a new order."""
         self.order = {}
         self.trade_id = ""
         self.order_id = ""
@@ -42,25 +41,40 @@ class Backtester:
         self._triggered_added = False
         self._multi_leg = False
         self._one_cancels_other = False
-    
+
         self.config = config
         self.api = api
         self.strategy_manager = strategy_manager
         self.data_manager = data_manager  # Make sure to pass the DataManager instance
 
-    
     def to_dict(self) -> dict:
-
         # Initialize the Dict.
         obj_dict = {
             "__class___": self.__class__.__name__,
             "__module___": self.__module__
         }
 
-        # Add the Object.
+        # Convert the strategy_manager and data_manager objects to dicts if possible.
+        if hasattr(self.strategy_manager, 'to_dict'):
+            obj_dict['strategy_manager'] = self.strategy_manager.to_dict()
+        else:
+            obj_dict['strategy_manager'] = str(self.strategy_manager)  # Fallback if no to_dict() method
+
+        if hasattr(self.data_manager, 'to_dict'):
+            obj_dict['data_manager'] = self.data_manager.to_dict()
+        else:
+            obj_dict['data_manager'] = str(self.data_manager)  # Fallback if no to_dict() method
+
+        # Add the Object's attributes.
         obj_dict.update(self.__dict__)
 
-        return obj_dict
+        # Convert to JSON string with indentation
+        formatted_dict = json.dumps(obj_dict, indent=4)
+
+        # Modify indentation to include '@@' and 4 spaces
+        formatted_dict_with_prefix = "\n".join([f"@@    {line}" for line in formatted_dict.splitlines()])
+
+        return formatted_dict_with_prefix
 
     def new_trade(self, trade_id: str, order_type: str, side: str, enter_or_exit: str, price: float = 0.00, stop_limit_price: float = 0.00) -> dict:
         """Creates a new Trade object template.
