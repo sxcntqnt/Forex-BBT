@@ -6,7 +6,6 @@ import time as time_true
 import pathlib
 from datetime import datetime, timezone, timedelta, UTC
 from typing import List, Dict, Union, Optional
-from configparser import ConfigParser
 
 # Third-party library imports
 import pandas as pd
@@ -27,7 +26,6 @@ from data_manager import DataManager
 from utils import TimestampUtils, PerformanceMonitor
 
 
-# We are going to be doing some timestamp conversions.
 class ForexBot:
     def __init__(
         self,
@@ -38,7 +36,7 @@ class ForexBot:
         api,
         paper_trading: bool = True,
     ):
-        """Central trading bot with dependency injection"""
+        """Central trading bot with dependency injection."""
         # Verify API connection
         asyncio.create_task(self._verify_api_connection())
 
@@ -46,58 +44,52 @@ class ForexBot:
         self.paper_trading = paper_trading
         self.logger = logger
         self.api = api
-        self.data_manager = data_manager  # Use injected instance
-        self.strategy_manager = strategy_manager  # Use injected instance
+        self.data_manager = data_manager
+        self.strategy_manager = strategy_manager
         self.risk_manager = RiskManager(config)
         self.portfolio_manager = PortfolioManager(config)
-        self.backtester = Backtester(
-            config, api, self.data_manager, self.strategy_manager
-        )
-        self.monitor = Monitor(
-            self.config, self.backtester
-        )  # Pass bot instance for monitoring
+        self.backtester = Backtester(config, api, self.data_manager, self.strategy_manager)
+        self.monitor = Monitor(self.config, self.backtester)
         self.performance_monitor = PerformanceMonitor(self.portfolio_manager)
         self.subscriptions: Dict[str, dict] = {}
         self.active_trades: Dict[str, dict] = {}
-        self.trades: Dict[str, Backtester] = {}  # Added for trade management
+        self.trades: Dict[str, Backtester] = {}
         self.running = False
-        self.trading_account = "DEMO123"  # Mock account number
-        self.timestamp_utils = TimestampUtils()  # Add this
+        self.trading_account = "DEMO123"
+        self.timestamp_utils = TimestampUtils()
         self.start_date = self.timestamp_utils.from_seconds(
             self.timestamp_utils.to_seconds(datetime.now(tz=timezone.utc))
             - config.HISTORICAL_DAYS * 86400
         )
         self.end_date = datetime.now(tz=timezone.utc)
-        self._bar_size = 1  # Default values for bar size/type
+        self._bar_size = 1
         self._bar_type = "minute"
 
     def _market_open(self, start_hour: int, end_hour: int) -> bool:
-        """Check if the market is open based on the given start and end hours"""
+        """Check if the market is open based on the given start and end hours."""
         now = datetime.now(tz=timezone.utc)
         start_time = self.timestamp_utils.to_seconds(
             now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
         )
-
         end_time = self.timestamp_utils.to_seconds(
             now.replace(hour=end_hour, minute=0, second=0, microsecond=0)
         )
         current_time = self.timestamp_utils.to_seconds(now)
-
         return start_time <= current_time <= end_time
 
     @property
     def pre_market_open(self) -> bool:
-        """Check if the pre-market is open"""
+        """Check if the pre-market is open."""
         return self._market_open(8, 9)
 
     @property
     def regular_market_open(self) -> bool:
-        """Check if the regular market is open"""
+        """Check if the regular market is open."""
         return self._market_open(13, 20)
 
     @property
     def post_market_open(self) -> bool:
-        """Check if the post-market is open"""
+        """Check if the post-market is open."""
         return self._market_open(20, 24)
 
     async def _verify_api_connection(self) -> None:
@@ -130,12 +122,8 @@ class ForexBot:
         price: float = 0.0,
         stop_limit_price: float = 0.0,
     ) -> Backtester:
-        self.logger.info(
-            f"Creating trade {trade_id} - {enter_or_exit} {long_or_short} order."
-        )
-        trade = Backtester(
-            self.config, self.api, self.data_manager, self.strategy_manager
-        )
+        self.logger.info(f"Creating trade {trade_id} - {enter_or_exit} {long_or_short} order.")
+        trade = Backtester(self.config, self.api, self.data_manager, self.strategy_manager)
         trade.new_trade(
             trade_id=trade_id,
             order_type=order_type,
@@ -161,15 +149,10 @@ class ForexBot:
     async def grab_current_quotes(self) -> dict:
         self.logger.info("Fetching current quotes for all positions.")
         symbols = self.portfolio_manager.positions.keys()
-
         try:
             quotes = await self.api.active_symbols({"active_symbols": "brief"})
             self.logger.info(f"Fetched quotes for {len(symbols)} symbols.")
-            return {
-                s["symbol"]: s
-                for s in quotes["active_symbols"]
-                if s["symbol"] in symbols
-            }
+            return {s["symbol"]: s for s in quotes["active_symbols"] if s["symbol"] in symbols}
         except Exception as e:
             self.logger.error(f"Error fetching quotes: {str(e)}")
             return {}
@@ -182,35 +165,27 @@ class ForexBot:
         bar_type: str = "minute",
         symbols: List[str] = None,
     ) -> Dict[str, Union[List[Dict], Dict]]:
-        self.logger.info(
-            f"Fetching historical prices for {len(symbols or self.config.SYMBOLS)} symbols."
-        )
+        self.logger.info(f"Fetching historical prices for {len(symbols or self.config.SYMBOLS)} symbols.")
         if not symbols:
             symbols = self.config.SYMBOLS
 
-        # Use the TimestampUtils class method to convert datetime to milliseconds
-        start_timestamp = self.timestamp_utils.to_milliseconds(
-            start_date
-        )  # Using TimestampUtils here
-        end_timestamp = self.timestamp_utils.to_milliseconds(
-            end_date
-        )  # Using TimestampUtils here
+        start_timestamp = self.timestamp_utils.to_milliseconds(start_date)
+        end_timestamp = self.timestamp_utils.to_milliseconds(end_date)
         historical_data = {}
         new_prices = []
 
-        # Function to fetch historical data for each symbol
         async def fetch_historical_data(symbol):
             clean_symbol = symbol.replace("frx", "")
             if not re.match(r"^[a-zA-Z]{2,30}$", clean_symbol):
                 self.logger.warning(f"Skipping invalid symbol: {symbol}")
-                return {}
+                return {}, []
 
             args = {
                 "ticks_history": clean_symbol,
                 "start": start_timestamp,
                 "end": end_timestamp,
                 "style": "candles",
-                "granularity": 60 if bar_type == "minute" else 300,  # Simplified
+                "granularity": 60 if bar_type == "minute" else 300,
                 "count": 5000,
                 "adjust_start_time": 1,
             }
@@ -219,7 +194,7 @@ class ForexBot:
                 response = await self.api.ticks_history(args)
                 if "candles" not in response:
                     self.logger.warning(f"No candles data for {symbol}")
-                    return {}
+                    return {}, []
 
                 symbol_data = {"candles": response["candles"]}
                 symbol_prices = [
@@ -230,9 +205,7 @@ class ForexBot:
                         "high": float(candle["high"]),
                         "low": float(candle["low"]),
                         "volume": candle.get("volume", 0),
-                        "datetime": self.timestamp_utils.from_milliseconds(
-                            candle["epoch"]
-                        ),  # Convert epoch to datetime using from_milliseconds
+                        "datetime": self.timestamp_utils.from_milliseconds(candle["epoch"]),
                     }
                     for candle in response["candles"]
                 ]
@@ -254,14 +227,11 @@ class ForexBot:
         return historical_data
 
     async def get_latest_bar(self) -> List[dict]:
-        # Simplified implementation for Deriv API
         latest_prices = []
         end_date = datetime.now(tz=UTC)
         start_date = end_date - timedelta(days=1)
         for symbol in self.config.SYMBOLS:
-            data = await self.grab_historical_prices(
-                start_date, end_date, 1, "minute", [symbol]
-            )
+            data = await self.grab_historical_prices(start_date, end_date, 1, "minute", [symbol])
             if "aggregated" in data and data["aggregated"]:
                 latest_prices.append(data["aggregated"][-1])
         return latest_prices
@@ -274,9 +244,7 @@ class ForexBot:
         )
         next_bar_time = last_bar_time + timedelta(seconds=60)
         curr_bar_time = datetime.now(tz=timezone.utc)
-        time_to_wait = max(
-            int(next_bar_time.timestamp() - curr_bar_time.timestamp()), 0
-        )
+        time_to_wait = max(int(next_bar_time.timestamp() - curr_bar_time.timestamp()), 0)
         self.logger.info(f"Waiting {time_to_wait} seconds for next bar.")
         await asyncio.sleep(time_to_wait)
 
@@ -284,15 +252,11 @@ class ForexBot:
         self.stock_frame = DataManager(self.config, self.api, self.logger, data=data)
         return self.stock_frame
 
-    async def execute_signals(
-        self, signals: List[pd.Series], trades_to_execute: dict
-    ) -> List[dict]:
-        # Placeholder - requires Trade class not provided
+    async def execute_signals(self, signals: List[pd.Series], trades_to_execute: dict) -> List[dict]:
         self.logger.info("Executing signals (placeholder implementation)")
         return []
 
     async def execute_orders(self, trade_obj: Backtester) -> dict:
-        # Placeholder - requires Trade class specifics
         self.logger.info("Executing order (placeholder)")
         return {"order_id": "mock123"}
 
@@ -301,30 +265,22 @@ class ForexBot:
             await f.write(json.dumps(order_response_dict, indent=4))
         return True
 
-    async def get_accounts(
-        self, account_number: str = None, all_accounts: bool = False
-    ) -> dict:
-        return {"DEMO123": {"balance": 10000}}  # Mock
+    async def get_accounts(self, account_number: str = None, all_accounts: bool = False) -> dict:
+        return {"DEMO123": {"balance": 10000}}
 
-    async def get_positions(
-        self, account_number: str = None, all_accounts: bool = False
-    ) -> List[Dict]:
-        return []  # Mock
+    async def get_positions(self, account_number: str = None, all_accounts: bool = False) -> List[Dict]:
+        return []
 
-    def _parse_account_balances(
-        self, accounts_response: Union[Dict, List]
-    ) -> List[Dict]:
-        return [{"account_number": "DEMO123", "cash_balance": 10000}]  # Mock
+    def _parse_account_balances(self, accounts_response: Union[Dict, List]) -> List[Dict]:
+        return [{"account_number": "DEMO123", "cash_balance": 10000}]
 
-    def _parse_account_positions(
-        self, positions_response: Union[List, Dict]
-    ) -> List[Dict]:
-        return []  # Mock
+    def _parse_account_positions(self, positions_response: Union[List, Dict]) -> List[Dict]:
+        return []
 
     async def run(self):
         self.running = True
         self.logger.info("ForexBot started running.")
-        await self._verify_api_connection()  # Ensure connection before proceeding
+        await self._verify_api_connection()
         for symbol in self.config.SYMBOLS:
             await self.subscribe_to_symbol(symbol, self.api)
         while self.running:
@@ -345,18 +301,13 @@ class ForexBot:
         def callback(data):
             self.data_manager.update(symbol, data)
             self.logger.debug(f"Tick for {symbol}: {data}")
-
         return callback
 
     async def check_trades(self):
         """Check if any trade conditions are met and execute if necessary."""
         for symbol in self.config.SYMBOLS:
-            if await self.strategy_manager.should_enter_trade(
-                symbol
-            ):  # Changed to await
+            if await self.strategy_manager.should_enter_trade(symbol):
                 await self.enter_trade(symbol)
-
-        # Monitor open positions and update portfolio
         await self.monitor.check_open_positions(self.api)
         await self.performance_monitor.update(self.portfolio_manager)
 
@@ -387,9 +338,7 @@ class ForexBot:
         start_date = datetime.strptime(self.config.BACKTEST_START_DATE, "%Y-%m-%d")
         end_date = datetime.strptime(self.config.BACKTEST_END_DATE, "%Y-%m-%d")
         data = await self.grab_historical_prices(start_date, end_date)
-        self.data_manager = DataManager(
-            self.config, self.api, self.logger, data=data["aggregated"]
-        )
+        self.data_manager = DataManager(self.config, self.api, self.logger, data=data["aggregated"])
         self.logger.info("DataManager initialized with historical data.")
 
     async def stop(self):
