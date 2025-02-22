@@ -39,6 +39,9 @@ class ForexBot:
         paper_trading: bool = True,
     ):
         """Central trading bot with dependency injection"""
+        # Verify API connection
+        asyncio.create_task(self._verify_api_connection())
+
         self.config = config
         self.paper_trading = paper_trading
         self.logger = logger
@@ -93,6 +96,21 @@ class ForexBot:
         """Check if the post-market is open"""
         return self._market_open(20, 24)
 
+
+    async def _verify_api_connection(self) -> None:
+        """Verify Deriv API connection asynchronously."""
+        try:
+            response = await self.api.ping({"ping": 1})
+            self.logger.debug("Ping response: %s", response)
+            if response.get("ping") == "pong":
+                self.logger.info("Deriv API connection established")
+            else:
+                self.logger.error("Unexpected ping response: %s", response)
+                raise ValueError("API ping failed")
+        except Exception as e:
+            self.logger.error("Deriv API initialization failed: %s", str(e))
+            raise
+ 
     async def create_portfolio(self) -> PortfolioManager:
         self.logger.info(f"Creating portfolio for account {self.trading_account}.")
         portfolio = PortfolioManager(self.config, account_number=self.trading_account)
@@ -303,6 +321,7 @@ class ForexBot:
     async def run(self):
         self.running = True
         self.logger.info("ForexBot started running.")
+        await self._verify_api_connection()  # Ensure connection before proceeding
         for symbol in self.config.SYMBOLS:
             await self.subscribe_to_symbol(symbol, self.api)
         while self.running:
