@@ -8,28 +8,30 @@ from pandas.core.window import RollingGroupby
 
 
 class DataManager:
-    def __init__(self, config: Config, api,logger, max_data_points: int = 100000) -> None:
+    def __init__(self, config: Config, api, logger, data=None, max_data_points: int = 100000) -> None:
         """Initializes the Stock Data Manager with real-time data from Deriv API.
 
         Args:
-            connection: Connection object for the Deriv API.
             config: Configuration object with settings like symbols.
+            api: Connection object for the Deriv API.
+            logger: Logger object for logging.
+            data: Optional initial data (defaults to None).
             max_data_points: Max number of data points to store for each symbol.
         """
-        self.config = config  # This line was missing
+        self.config = config
         self.api = api
-        self.symbols = config.SYMBOLS  # Now accessible
+        self.symbols = config.SYMBOLS
         self.max_data_points = max_data_points
         self.data_frames = {
-            symbol: pd.DataFrame(columns=["symbol","timestamp", "open", "high", "low", "close", "bid", "ask", "quote"])
+            symbol: pd.DataFrame(columns=["symbol", "timestamp", "open", "high", "low", "close", "bid", "ask", "quote"])
             for symbol in self.symbols
         }
         self.logger = logger
+        self.data = data if data is not None else {}
         self.subscriptions = {}
         self.last_data = {}
         self._symbol_groups = None  # Initialize appropriately
         self._frame = pd.DataFrame()  # Initialize your main dataframe
-    
 
     @property
     def frame(self):
@@ -42,7 +44,7 @@ class DataManager:
             symbol: The symbol to track.
 
         Returns:
-            callback function to handle real-time tick data.
+            Callbackfunction to handle real-time tick data.
         """
         count = 0
 
@@ -50,21 +52,18 @@ class DataManager:
             nonlocal count
             count += 1
             self.last_data[symbol] = data
-            print(f"Received data for symbol {symbol}: {data} (Count: {count})")
+            self.logger.debug(f"Received data for symbol {symbol}: {data} (Count: {count})")
             self.update(symbol, data)
 
         return cb
 
-
     async def subscribe_to_ticks(self, symbol):
         """Subscribe to tick stream for a given symbol."""
         try:
-            # Ensure symbol is a string and not empty
             if not isinstance(symbol, str) or not symbol:
                 self.logger.error(f"Invalid symbol: {symbol}")
                 return
 
-            # Subscribe to the full symbol
             tick_stream = await self.api.subscribe({"ticks": symbol, "subscribe": 1})
             self.subscriptions[symbol] = tick_stream
             tick_stream.subscribe(self.create_subs_cb(symbol))
@@ -72,19 +71,19 @@ class DataManager:
         except Exception as e:
             self.logger.error(f"Error subscribing to {symbol}: {e}")
 
-
     async def start_subscriptions(self) -> None:
         """Starts WebSocket subscriptions for all symbols."""
         if not self.symbols:
-            print("No symbols to subscribe to.")
+            self.logger.warning("No symbols to subscribe to.")
             return
 
         tasks = [self.subscribe_to_ticks(symbol) for symbol in self.symbols]
 
         try:
             await asyncio.gather(*tasks)
+            self.logger.info("All subscriptions started successfully.")
         except Exception as e:
-            print(f"Error during subscription: {e}")
+            self.logger.error(f"Error during subscription: {e}")
 
     async def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
         """Updates the DataFrame for the specified symbol with new tick data.
@@ -94,10 +93,18 @@ class DataManager:
             tick: The tick data (a dictionary containing price data).
         """
         try:
-            epoch = tick["tick"]["epoch"]
-            ask = tick["tick"]["ask"]
-            bid = tick["tick"]["bid"]
-            quote = tick["tick"]["quote"]
+            if "tick" not in tick:
+                self.logger.error(f"Invalid tick data for symbol {symbol}: 'tick' key missing.")
+                return
+
+            epoch = tick["tick"].get("epoch")
+            ask = tick["tick"].get("ask")
+            bid = tick["tick"].get("bid")
+            quote = tick["tick"].get("quote")
+
+            if None in (epoch, ask, bid, quote):
+                self.logger.error(f"Incomplete tick data for symbol {symbol}: {tick}")
+                return
 
             new_data = pd.DataFrame({
                 "symbol": [symbol],
@@ -114,11 +121,11 @@ class DataManager:
             if symbol in self.data_frames:
                 self.data_frames[symbol] = pd.concat([self.data_frames[symbol], new_data]).tail(self.max_data_points)
             else:
-                print(f"Symbol {symbol} not found in managed symbols.")
+                self.logger.warning(f"Symbol {symbol} not found in managed symbols.")
         except KeyError as e:
-            print(f"KeyError: Missing expected key in tick data - {e}")
+            self.logger.error(f"KeyError: Missing expected key in tick data - {e}")
         except Exception as e:
-            print(f"Error updating symbol {symbol}: {e}")
+            self.logger.error(f"Error updating symbol {symbol}: {e}")
 
     async def stop_subscriptions(self):
         """Proper subscription cleanup"""
@@ -167,10 +174,10 @@ class DataManager:
         Returns:
             A pandas GroupBy object grouped by symbol.
         """
-        if not self.data_frames:
+        if not self.data:
             return pd.DataFrame().groupby([])
         
-        return pd.concat(self.data_frames.values()).groupby("symbol", as_index=False)
+        return pd.concat(self.data.values()).groupby("symbol", as_index=False)
 
     async def symbol_rolling_groups(self, size: int) -> RollingGroupby:
         """Grabs rolling windows of data for each symbol.

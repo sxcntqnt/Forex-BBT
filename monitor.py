@@ -1,5 +1,5 @@
 from backtester import Backtester
-
+from config import Config
 
 class Monitor:
     def __init__(self, config, trade_obj: Backtester) -> None:

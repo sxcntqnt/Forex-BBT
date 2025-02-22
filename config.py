@@ -15,7 +15,7 @@ class Config:
 
 
         # Load other configuration variables
-        self.API_TOKEN = self.config['DEFAULT'].get('DERIV_API_TOKEN')
+        self.DERIV_API_TOKEN = self.config['DEFAULT'].get('DERIV_API_TOKEN')
         self.APP_ID = self.config['DEFAULT'].get('APP_ID')
         self.EndPoint = self.config['DEFAULT'].get('EndPoint')
 

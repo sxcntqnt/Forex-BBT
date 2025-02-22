@@ -20,32 +20,37 @@ from typing import Union
 from MLStrat import MLStrategy
 
 class StrategyManager:
-    def __init__(self, data_manager: DataManager, api):
+    def __init__(self, data_manager: DataManager, api, logger):
         """Initialize with validated DataManager instance"""
         if not isinstance(data_manager, DataManager):
             raise TypeError("Requires initialized DataManager instance")
 
         # Set core dependencies
         self.api = api
-        self._stock_frame = data_manager  # Changed from price_dataframe to data_manager
         self.data_manager = data_manager
         self.config = data_manager.config
         self.symbols = self.config.SYMBOLS
+        self.logger = logger
 
         # Initialize data structures
-        self._price_groups = data_manager.symbol_groups
+        self._price_groups = data_manager._symbol_groups  # Assuming this is a property in DataManager
         self._current_indicators = {}
         self._indicator_signals = {}
-        self._frame = self._stock_frame.frame  # Verify frame exists in DataManager
-        self._indicators_comp_key = []
-        self._indicators_key = []
-        self._frame = pd.concat(data_manager.data_frames.values())
+
+        # Initialize the main DataFrame
+        if not data_manager.data:  # Check if data is empty
+            self.logger.warning("No DataFrames available to concatenate.")
+            self._frame = pd.DataFrame()  # Initialize with an empty DataFrame
+        else:
+            self._frame = pd.concat(data_manager.data.values(), ignore_index=True)  # Concatenate DataFrames
+
         # Initialize strategies
         self.strategies = [
             RSIStrategy(),
             MACDStrategy(),
             MLStrategy(self.config)
         ]
+
     async def should_enter_trade(self, symbol: str) -> bool:
         """Determines if a trade should be entered based on strategies."""
         return any([
