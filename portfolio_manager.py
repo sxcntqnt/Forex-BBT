@@ -2,7 +2,7 @@ import numpy as np
 
 from pandas import DataFrame
 from typing import Tuple
-from typing import List    
+from typing import List
 from typing import Optional
 
 
@@ -10,8 +10,7 @@ from data_manager import DataManager
 from deriv_api import DerivAPI
 
 
-
-class PortfolioManager():
+class PortfolioManager:
     def __init__(self, config, account_number: Optional[str] = None) -> None:
         """Initalizes a new instance of the Portfolio object.
 
@@ -23,9 +22,9 @@ class PortfolioManager():
         self.positions = {}
         self.positions_count = 0
 
-        self.profit_loss = 0.00 
-        self.market_value = 0.00  
-        self.risk_tolerance = 0.00    
+        self.profit_loss = 0.00
+        self.market_value = 0.00
+        self.risk_tolerance = 0.00
         self.account_number = account_number
 
         self._historical_prices = []
@@ -34,7 +33,6 @@ class PortfolioManager():
         self._stock_frame: DataManager = None
         self._stock_frame_daily: DataManager = None
 
-
         self.config = config
         self.positions = {symbol: [] for symbol in config.SYMBOLS}
 
@@ -42,15 +40,15 @@ class PortfolioManager():
         self.positions[symbol].append(contract)
 
     def close_trade(self, symbol, contract_id):
-        self.positions[symbol] = [c for c in self.positions[symbol] if c['id'] != contract_id]
+        self.positions[symbol] = [
+            c for c in self.positions[symbol] if c["id"] != contract_id
+        ]
 
     def get_open_positions(self):
         return {symbol: len(positions) for symbol, positions in self.positions.items()}
 
     def get_total_exposure(self):
         return sum(len(positions) for positions in self.positions.values())
-
-
 
     def add_positions(self, positions: List[dict]) -> dict:
         """Add Multiple positions to the portfolio at once.
@@ -112,19 +110,26 @@ class PortfolioManager():
 
                 # Add the position.
                 self.add_position(
-                    symbol=position['symbol'],
-                    asset_type=position['asset_type'],
-                    quantity=position.get('quantity', 0),
-                    purchase_price=position.get('purchase_price', 0.0),
-                    purchase_date=position.get('purchase_date', None)
+                    symbol=position["symbol"],
+                    asset_type=position["asset_type"],
+                    quantity=position.get("quantity", 0),
+                    purchase_price=position.get("purchase_price", 0.0),
+                    purchase_date=position.get("purchase_date", None),
                 )
 
             return self.positions
 
         else:
-            raise TypeError('Positions must be a list of dictionaries.')
+            raise TypeError("Positions must be a list of dictionaries.")
 
-    def add_position(self, symbol: str, asset_type: str, purchase_date: Optional[str] = None, quantity: int = 0, purchase_price: float = 0.0) -> dict:
+    def add_position(
+        self,
+        symbol: str,
+        asset_type: str,
+        purchase_date: Optional[str] = None,
+        quantity: int = 0,
+        purchase_price: float = 0.0,
+    ) -> dict:
         """Adds a single new position to the the portfolio.
 
         Arguments:
@@ -150,16 +155,16 @@ class PortfolioManager():
         Usage:
         ----
             >>> portfolio = Portfolio()
-            >>> new_position = Portfolio.add_position(symbol='MSFT', 
-                    asset_type='equity', 
-                    quantity=2, 
+            >>> new_position = Portfolio.add_position(symbol='MSFT',
+                    asset_type='equity',
+                    quantity=2,
                     purchase_price=4.00,
                     purchase_date="2020-01-31"
                 )
             >>> new_position
             {
-                'asset_type': 'equity', 
-                'quantity': 2, 
+                'asset_type': 'equity',
+                'quantity': 2,
                 'purchase_price': 4.00,
                 'symbol': 'MSFT',
                 'purchase_date': '2020-01-31'
@@ -167,16 +172,16 @@ class PortfolioManager():
         """
 
         self.positions[symbol] = {}
-        self.positions[symbol]['symbol'] = symbol
-        self.positions[symbol]['quantity'] = quantity
-        self.positions[symbol]['purchase_price'] = purchase_price
-        self.positions[symbol]['purchase_date'] = purchase_date
-        self.positions[symbol]['asset_type'] = asset_type
+        self.positions[symbol]["symbol"] = symbol
+        self.positions[symbol]["quantity"] = quantity
+        self.positions[symbol]["purchase_price"] = purchase_price
+        self.positions[symbol]["purchase_date"] = purchase_date
+        self.positions[symbol]["asset_type"] = asset_type
 
         if purchase_date:
-            self.positions[symbol]['ownership_status'] = True
+            self.positions[symbol]["ownership_status"] = True
         else:
-            self.positions[symbol]['ownership_status'] = False
+            self.positions[symbol]["ownership_status"] = False
 
         return self.positions[symbol]
 
@@ -189,7 +194,7 @@ class PortfolioManager():
 
         Returns:
         ----
-        {Tuple[bool, str]} -- Returns `True` if successfully deleted, `False` otherwise 
+        {Tuple[bool, str]} -- Returns `True` if successfully deleted, `False` otherwise
             along with a message.
 
         Usage:
@@ -197,9 +202,9 @@ class PortfolioManager():
             >>> portfolio = Portfolio()
 
             >>> new_position = Portfolio.add_position(
-                    symbol='MSFT', 
-                    asset_type='equity', 
-                    quantity=2, 
+                    symbol='MSFT',
+                    asset_type='equity',
+                    quantity=2,
                     purchase_price=4.00,
                     purchase_date="2020-01-31"
                 )
@@ -216,22 +221,27 @@ class PortfolioManager():
             del self.positions[symbol]
             return (True, "{symbol} was successfully removed.".format(symbol=symbol))
         else:
-            return (False, "{symbol} did not exist in the porfolio.".format(symbol=symbol))
+            return (
+                False,
+                "{symbol} did not exist in the porfolio.".format(symbol=symbol),
+            )
 
     def total_allocation(self) -> dict:
         """Returns a summary of the portfolio by asset allocation."""
 
         total_allocation = {
-            'stocks': [],
-            'fixed_income': [],
-            'options': [],
-            'futures': [],
-            'furex': []
+            "stocks": [],
+            "fixed_income": [],
+            "options": [],
+            "futures": [],
+            "furex": [],
         }
 
         if len(self.positions.keys()) > 0:
             for symbol in self.positions:
-                total_allocation[self.positions[symbol]['asset_type']].append(self.positions[symbol])
+                total_allocation[self.positions[symbol]["asset_type"]].append(
+                    self.positions[symbol]
+                )
 
     def portfolio_variance(self, weights: dict, covariance_matrix: DataFrame) -> dict:
 
@@ -240,8 +250,7 @@ class PortfolioManager():
 
         sorted_weights = np.array([weights[symbol] for symbol in sorted_keys])
         portfolio_variance = np.dot(
-            sorted_weights.T,
-            np.dot(covariance_matrix, sorted_weights)
+            sorted_weights.T, np.dot(covariance_matrix, sorted_weights)
         )
 
         return portfolio_variance
@@ -275,55 +284,69 @@ class PortfolioManager():
         porftolio_weights = self.portfolio_weights()
 
         # Calculate the Daily Returns (%)
-        self._stock_frame_daily.frame['daily_returns_pct'] = self._stock_frame_daily.symbol_groups['close'].transform(
-            lambda x: x.pct_change()
+        self._stock_frame_daily.frame["daily_returns_pct"] = (
+            self._stock_frame_daily.symbol_groups["close"].transform(
+                lambda x: x.pct_change()
+            )
         )
 
         # Calculate the Daily Returns (Mean)
-        self._stock_frame_daily.frame['daily_returns_avg'] = self._stock_frame_daily.symbol_groups['daily_returns_pct'].transform(
-            lambda x: x.mean()
+        self._stock_frame_daily.frame["daily_returns_avg"] = (
+            self._stock_frame_daily.symbol_groups["daily_returns_pct"].transform(
+                lambda x: x.mean()
+            )
         )
 
         # Calculate the Daily Returns (Standard Deviation)
-        self._stock_frame_daily.frame['daily_returns_std'] = self._stock_frame_daily.symbol_groups['daily_returns_pct'].transform(
-            lambda x: x.std()
+        self._stock_frame_daily.frame["daily_returns_std"] = (
+            self._stock_frame_daily.symbol_groups["daily_returns_pct"].transform(
+                lambda x: x.std()
+            )
         )
 
         # Calculate the Covariance.
-        returns_cov = self._stock_frame_daily.frame.unstack(
-            level=0)['daily_returns_pct'].cov()
+        returns_cov = self._stock_frame_daily.frame.unstack(level=0)[
+            "daily_returns_pct"
+        ].cov()
 
         # Take the other columns and get ready to add them to our dictionary.
-        returns_avg = self._stock_frame_daily.symbol_groups['daily_returns_avg'].tail(
-            n=1
-        ).to_dict()
+        returns_avg = (
+            self._stock_frame_daily.symbol_groups["daily_returns_avg"]
+            .tail(n=1)
+            .to_dict()
+        )
 
-        returns_std = self._stock_frame_daily.symbol_groups['daily_returns_std'].tail(
-            n=1
-        ).to_dict()
+        returns_std = (
+            self._stock_frame_daily.symbol_groups["daily_returns_std"]
+            .tail(n=1)
+            .to_dict()
+        )
 
         metrics_dict = {}
 
         portfolio_variance = self.portfolio_variance(
-            weights=porftolio_weights,
-            covariance_matrix=returns_cov
+            weights=porftolio_weights, covariance_matrix=returns_cov
         )
 
         for index_tuple in returns_std:
 
             symbol = index_tuple[0]
             metrics_dict[symbol] = {}
-            metrics_dict[symbol]['weight'] = porftolio_weights[symbol]
-            metrics_dict[symbol]['average_returns'] = returns_avg[index_tuple]
-            metrics_dict[symbol]['weighted_returns'] = returns_avg[index_tuple] * \
-                metrics_dict[symbol]['weight']
-            metrics_dict[symbol]['standard_deviation_of_returns'] = returns_std[index_tuple]
-            metrics_dict[symbol]['variance_of_returns'] = returns_std[index_tuple] ** 2
-            metrics_dict[symbol]['covariance_of_returns'] = returns_cov.loc[[
-                symbol]].to_dict()
+            metrics_dict[symbol]["weight"] = porftolio_weights[symbol]
+            metrics_dict[symbol]["average_returns"] = returns_avg[index_tuple]
+            metrics_dict[symbol]["weighted_returns"] = (
+                returns_avg[index_tuple] * metrics_dict[symbol]["weight"]
+            )
+            metrics_dict[symbol]["standard_deviation_of_returns"] = returns_std[
+                index_tuple
+            ]
+            metrics_dict[symbol]["variance_of_returns"] = returns_std[index_tuple] ** 2
+            metrics_dict[symbol]["covariance_of_returns"] = returns_cov.loc[
+                [symbol]
+            ].to_dict()
 
-        metrics_dict['portfolio'] = {}
-        metrics_dict['portfolio']['variance'] = portfolio_variance
+        metrics_dict["portfolio"] = {}
+        metrics_dict["portfolio"]["variance"] = portfolio_variance
 
         return metrics_dict
 
@@ -344,17 +367,17 @@ class PortfolioManager():
         quotes = self.td_client.get_quotes(instruments=list(symbols))
 
         # Grab the projected market value.
-        projected_market_value_dict = self.projected_market_value(
-            current_prices=quotes
-        )
+        projected_market_value_dict = self.projected_market_value(current_prices=quotes)
 
         # Loop through each symbol.
         for symbol in projected_market_value_dict:
 
             # Calculate the weights.
-            if symbol != 'total':
-                weights[symbol] = projected_market_value_dict[symbol]['total_market_value'] / \
-                    projected_market_value_dict['total']['total_market_value']
+            if symbol != "total":
+                weights[symbol] = (
+                    projected_market_value_dict[symbol]["total_market_value"]
+                    / projected_market_value_dict["total"]["total_market_value"]
+                )
 
         return weights
 
@@ -368,11 +391,11 @@ class PortfolioManager():
         quotes = self.td_client.get_quotes(instruments=list(symbols))
 
         portfolio_summary_dict = {}
-        portfolio_summary_dict['projected_market_value'] = self.projected_market_value(
+        portfolio_summary_dict["projected_market_value"] = self.projected_market_value(
             current_prices=quotes
         )
-        portfolio_summary_dict['portfolio_weights'] = self.portfolio_weights()
-        portfolio_summary_dict['portfolio_risk'] = ""
+        portfolio_summary_dict["portfolio_weights"] = self.portfolio_weights()
+        portfolio_summary_dict["portfolio_risk"] = ""
 
         return portfolio_summary_dict
 
@@ -391,7 +414,7 @@ class PortfolioManager():
         ----
             >>> portfolio = Portfolio()
             >>> new_position = Portfolio.add_position(
-                symbol='MSFT', 
+                symbol='MSFT',
                 asset_type='equity'
             )
             >>> in_position_flag = Portfolio.in_portfolio(symbol='MSFT')
@@ -416,8 +439,11 @@ class PortfolioManager():
         {bool} -- `True` if the we own the position, `False` if we do not own it.
         """
 
-        if self.in_portfolio(symbol=symbol) and self.positions[symbol]['ownership_status']:
-            return self.positions[symbol]['ownership_status']
+        if (
+            self.in_portfolio(symbol=symbol)
+            and self.positions[symbol]["ownership_status"]
+        ):
+            return self.positions[symbol]["ownership_status"]
         else:
             return False
 
@@ -437,7 +463,7 @@ class PortfolioManager():
         """
 
         if self.in_portfolio(symbol=symbol):
-            self.positions[symbol]['ownership_status'] = ownership
+            self.positions[symbol]["ownership_status"] = ownership
         else:
             raise KeyError(
                 "Can't set ownership status, as you do not have the symbol in your portfolio."
@@ -465,7 +491,7 @@ class PortfolioManager():
         ----
             >>> portfolio = Portfolio()
             >>> new_position = Portfolio.add_position(
-                symbol='MSFT', 
+                symbol='MSFT',
                 asset_type='equity',
                 purchase_price=4.00,
                 purchase_date="2020-01-31"
@@ -480,13 +506,13 @@ class PortfolioManager():
 
         # Grab the purchase price, if it exists.
         if self.in_portfolio(symbol=symbol):
-            purchase_price = self.positions[symbol]['purchase_price']
+            purchase_price = self.positions[symbol]["purchase_price"]
         else:
             raise KeyError("The Symbol you tried to request does not exist.")
 
-        if (purchase_price <= current_price):
+        if purchase_price <= current_price:
             return True
-        elif (purchase_price > current_price):
+        elif purchase_price > current_price:
             return False
 
     def projected_market_value(self, current_prices: dict) -> dict:
@@ -506,12 +532,12 @@ class PortfolioManager():
         ----
             >>> portfolio = Portfolio()
             >>> new_position = portfolio.add_position(
-                symbol='MSFT', 
+                symbol='MSFT',
                 asset_type='equity',
                 purchase_price=4.00,
                 purchase_date="2020-01-31"
             )
-            >>> portfolio_summary = portfolio.projected_market_value(current_prices={'MSFT':{'lastPrice': 8.00, 'openPrice': 7.50}})        
+            >>> portfolio_summary = portfolio.projected_market_value(current_prices={'MSFT':{'lastPrice': 8.00, 'openPrice': 7.50}})
         """
 
         projected_value = {}
@@ -528,49 +554,64 @@ class PortfolioManager():
             if self.in_portfolio(symbol=symbol):
 
                 projected_value[symbol] = {}
-                current_quantity = self.positions[symbol]['quantity']
-                purchase_price = self.positions[symbol]['purchase_price']
-                current_price = current_prices[symbol]['lastPrice']
+                current_quantity = self.positions[symbol]["quantity"]
+                purchase_price = self.positions[symbol]["purchase_price"]
+                current_price = current_prices[symbol]["lastPrice"]
                 is_profitable = self.is_profitable(
-                    symbol=symbol, current_price=current_price)
+                    symbol=symbol, current_price=current_price
+                )
 
-                projected_value[symbol]['purchase_price'] = purchase_price
-                projected_value[symbol]['current_price'] = current_prices[symbol]['lastPrice']
-                projected_value[symbol]['quantity'] = current_quantity
-                projected_value[symbol]['is_profitable'] = is_profitable
+                projected_value[symbol]["purchase_price"] = purchase_price
+                projected_value[symbol]["current_price"] = current_prices[symbol][
+                    "lastPrice"
+                ]
+                projected_value[symbol]["quantity"] = current_quantity
+                projected_value[symbol]["is_profitable"] = is_profitable
 
                 # Calculate total market value.
-                projected_value[symbol]['total_market_value'] = (
+                projected_value[symbol]["total_market_value"] = (
                     current_price * current_quantity
                 )
 
                 # Calculate total invested capital.
-                projected_value[symbol]['total_invested_capital'] = (
+                projected_value[symbol]["total_invested_capital"] = (
                     current_quantity * purchase_price
                 )
 
-                projected_value[symbol]['total_loss_or_gain_$'] = ((current_price - purchase_price) * current_quantity)
-                projected_value[symbol]['total_loss_or_gain_%'] = round(((current_price - purchase_price) / purchase_price), 4)
+                projected_value[symbol]["total_loss_or_gain_$"] = (
+                    current_price - purchase_price
+                ) * current_quantity
+                projected_value[symbol]["total_loss_or_gain_%"] = round(
+                    ((current_price - purchase_price) / purchase_price), 4
+                )
 
-                total_value += projected_value[symbol]['total_market_value']
-                total_profit_or_loss += projected_value[symbol]['total_loss_or_gain_$']
-                total_invested_capital += projected_value[symbol]['total_invested_capital']
+                total_value += projected_value[symbol]["total_market_value"]
+                total_profit_or_loss += projected_value[symbol]["total_loss_or_gain_$"]
+                total_invested_capital += projected_value[symbol][
+                    "total_invested_capital"
+                ]
 
-                if projected_value[symbol]['total_loss_or_gain_$'] > 0:
+                if projected_value[symbol]["total_loss_or_gain_$"] > 0:
                     position_count_profitable += 1
-                elif projected_value[symbol]['total_loss_or_gain_$'] < 0:
+                elif projected_value[symbol]["total_loss_or_gain_$"] < 0:
                     position_count_not_profitable += 1
                 else:
                     position_count_break_even += 1
 
-        projected_value['total'] = {}
-        projected_value['total']['total_positions'] = len(self.positions)
-        projected_value['total']['total_market_value'] = total_value
-        projected_value['total']['total_invested_capital'] = total_invested_capital
-        projected_value['total']['total_profit_or_loss'] = total_profit_or_loss
-        projected_value['total']['number_of_profitable_positions'] = position_count_profitable
-        projected_value['total']['number_of_non_profitable_positions'] = position_count_not_profitable
-        projected_value['total']['number_of_breakeven_positions'] = position_count_break_even
+        projected_value["total"] = {}
+        projected_value["total"]["total_positions"] = len(self.positions)
+        projected_value["total"]["total_market_value"] = total_value
+        projected_value["total"]["total_invested_capital"] = total_invested_capital
+        projected_value["total"]["total_profit_or_loss"] = total_profit_or_loss
+        projected_value["total"][
+            "number_of_profitable_positions"
+        ] = position_count_profitable
+        projected_value["total"][
+            "number_of_non_profitable_positions"
+        ] = position_count_not_profitable
+        projected_value["total"][
+            "number_of_breakeven_positions"
+        ] = position_count_break_even
 
         return projected_value
 
@@ -654,24 +695,24 @@ class PortfolioManager():
             # Grab the historical prices.
             historical_prices_response = self.td_client.get_price_history(
                 symbol=symbol,
-                period_type='year',
+                period_type="year",
                 period=1,
-                frequency_type='daily',
+                frequency_type="daily",
                 frequency=1,
-                extended_hours=True
+                extended_hours=True,
             )
 
             # Loop through the chandles.
-            for candle in historical_prices_response['candles']:
+            for candle in historical_prices_response["candles"]:
 
                 new_price_mini_dict = {}
-                new_price_mini_dict['symbol'] = symbol
-                new_price_mini_dict['open'] = candle['open']
-                new_price_mini_dict['close'] = candle['close']
-                new_price_mini_dict['high'] = candle['high']
-                new_price_mini_dict['low'] = candle['low']
-                new_price_mini_dict['volume'] = candle['volume']
-                new_price_mini_dict['datetime'] = candle['datetime']
+                new_price_mini_dict["symbol"] = symbol
+                new_price_mini_dict["open"] = candle["open"]
+                new_price_mini_dict["close"] = candle["close"]
+                new_price_mini_dict["high"] = candle["high"]
+                new_price_mini_dict["low"] = candle["low"]
+                new_price_mini_dict["volume"] = candle["volume"]
+                new_price_mini_dict["datetime"] = candle["datetime"]
                 new_prices.append(new_price_mini_dict)
 
         # Create and set the DataManager

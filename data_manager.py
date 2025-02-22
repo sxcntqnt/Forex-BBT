@@ -8,7 +8,9 @@ from pandas.core.window import RollingGroupby
 
 
 class DataManager:
-    def __init__(self, config: Config, api, logger, data=None, max_data_points: int = 100000) -> None:
+    def __init__(
+        self, config: Config, api, logger, data=None, max_data_points: int = 100000
+    ) -> None:
         """Initializes the Stock Data Manager with real-time data from Deriv API.
 
         Args:
@@ -23,7 +25,19 @@ class DataManager:
         self.symbols = config.SYMBOLS
         self.max_data_points = max_data_points
         self.data_frames = {
-            symbol: pd.DataFrame(columns=["symbol", "timestamp", "open", "high", "low", "close", "bid", "ask", "quote"])
+            symbol: pd.DataFrame(
+                columns=[
+                    "symbol",
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "bid",
+                    "ask",
+                    "quote",
+                ]
+            )
             for symbol in self.symbols
         }
         self.logger = logger
@@ -52,7 +66,9 @@ class DataManager:
             nonlocal count
             count += 1
             self.last_data[symbol] = data
-            self.logger.debug(f"Received data for symbol {symbol}: {data} (Count: {count})")
+            self.logger.debug(
+                f"Received data for symbol {symbol}: {data} (Count: {count})"
+            )
             self.update(symbol, data)
 
         return cb
@@ -94,7 +110,9 @@ class DataManager:
         """
         try:
             if "tick" not in tick:
-                self.logger.error(f"Invalid tick data for symbol {symbol}: 'tick' key missing.")
+                self.logger.error(
+                    f"Invalid tick data for symbol {symbol}: 'tick' key missing."
+                )
                 return
 
             epoch = tick["tick"].get("epoch")
@@ -106,20 +124,24 @@ class DataManager:
                 self.logger.error(f"Incomplete tick data for symbol {symbol}: {tick}")
                 return
 
-            new_data = pd.DataFrame({
-                "symbol": [symbol],
-                "timestamp": [epoch],
-                "open": [bid],
-                "high": [ask],
-                "low": [bid],
-                "close": [bid],
-                "bid": [bid],
-                "ask": [ask],
-                "quote": [quote],
-            })
+            new_data = pd.DataFrame(
+                {
+                    "symbol": [symbol],
+                    "timestamp": [epoch],
+                    "open": [bid],
+                    "high": [ask],
+                    "low": [bid],
+                    "close": [bid],
+                    "bid": [bid],
+                    "ask": [ask],
+                    "quote": [quote],
+                }
+            )
 
             if symbol in self.data_frames:
-                self.data_frames[symbol] = pd.concat([self.data_frames[symbol], new_data]).tail(self.max_data_points)
+                self.data_frames[symbol] = pd.concat(
+                    [self.data_frames[symbol], new_data]
+                ).tail(self.max_data_points)
             else:
                 self.logger.warning(f"Symbol {symbol} not found in managed symbols.")
         except KeyError as e:
@@ -135,7 +157,6 @@ class DataManager:
             except Exception as e:
                 logger.error(f"Error unsubscribing {symbol}: {str(e)}")
         self.subscriptions.clear()
-
 
     def get_close_prices(self, symbol: str) -> List[float]:
         """Retrieves the close prices for the specified symbol.
@@ -176,7 +197,7 @@ class DataManager:
         """
         if not self.data:
             return pd.DataFrame().groupby([])
-        
+
         return pd.concat(self.data.values()).groupby("symbol", as_index=False)
 
     async def symbol_rolling_groups(self, size: int) -> RollingGroupby:
@@ -202,7 +223,13 @@ class DataManager:
         for quote in data:
             time_stamp = pd.to_datetime(quote["datetime"], unit="ms", origin="unix")
             row_id = (quote["symbol"], time_stamp)
-            row_values = [quote["open"], quote["close"], quote["high"], quote["low"], quote["volume"]]
+            row_values = [
+                quote["open"],
+                quote["close"],
+                quote["high"],
+                quote["low"],
+                quote["volume"],
+            ]
             new_row = pd.Series(data=row_values, index=column_names)
             self.data_frames[quote["symbol"]].loc[row_id] = new_row
 
@@ -258,8 +285,17 @@ class DataManager:
     def reset_data(self) -> None:
         """Resets all internal data structures, clearing all stored information."""
         self.data_frames = {
-            symbol: pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "bid", "ask", "quote"])
+            symbol: pd.DataFrame(
+                columns=[
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "bid",
+                    "ask",
+                    "quote",
+                ]
+            )
             for symbol in self.symbols
         }
-
-

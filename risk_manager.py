@@ -13,4 +13,3 @@ class RiskManager:
 
     def update_open_trades(self, symbol, count):
         self.open_trades[symbol] = count
-

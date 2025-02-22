@@ -24,7 +24,7 @@ from backtester import Backtester
 from risk_manager import RiskManager
 from monitor import Monitor
 from data_manager import DataManager
-from utils import TimestampUtils,PerformanceMonitor
+from utils import TimestampUtils, PerformanceMonitor
 
 
 # We are going to be doing some timestamp conversions.
@@ -50,8 +50,12 @@ class ForexBot:
         self.strategy_manager = strategy_manager  # Use injected instance
         self.risk_manager = RiskManager(config)
         self.portfolio_manager = PortfolioManager(config)
-        self.backtester = Backtester(config, api, self.data_manager, self.strategy_manager)
-        self.monitor = Monitor(self.config, self.backtester)  # Pass bot instance for monitoring
+        self.backtester = Backtester(
+            config, api, self.data_manager, self.strategy_manager
+        )
+        self.monitor = Monitor(
+            self.config, self.backtester
+        )  # Pass bot instance for monitoring
         self.performance_monitor = PerformanceMonitor(self.portfolio_manager)
         self.subscriptions: Dict[str, dict] = {}
         self.active_trades: Dict[str, dict] = {}
@@ -78,7 +82,7 @@ class ForexBot:
             now.replace(hour=end_hour, minute=0, second=0, microsecond=0)
         )
         current_time = self.timestamp_utils.to_seconds(now)
-        
+
         return start_time <= current_time <= end_time
 
     @property
@@ -96,7 +100,6 @@ class ForexBot:
         """Check if the post-market is open"""
         return self._market_open(20, 24)
 
-
     async def _verify_api_connection(self) -> None:
         """Verify Deriv API connection asynchronously."""
         try:
@@ -110,7 +113,7 @@ class ForexBot:
         except Exception as e:
             self.logger.error("Deriv API initialization failed: %s", str(e))
             raise
- 
+
     async def create_portfolio(self) -> PortfolioManager:
         self.logger.info(f"Creating portfolio for account {self.trading_account}.")
         portfolio = PortfolioManager(self.config, account_number=self.trading_account)
