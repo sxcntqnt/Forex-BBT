@@ -3,9 +3,12 @@ import logging
 import sys
 import os
 import tracemalloc
+import time
+
 from contextlib import closing
 from datetime import datetime, timezone
 from typing import Dict, List, Union, Tuple
+from functools import partial
 
 from config import Config
 from data_manager import DataManager
@@ -16,13 +19,17 @@ from strategy import StrategyManager
 from web_interface import start_web_interface
 
 # Configure logging with process ID
-with closing(logging.FileHandler("bot_debug.log")) as file_handler:
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s - PID:%(process)d - %(name)s - %(levelname)s - %(message)s",
-        handlers=[file_handler, logging.StreamHandler()],
-    )
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - PID:%(process)d - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("bot_debug.log", mode="w"),
+        logging.StreamHandler(),
+    ],
+)
 logger = logging.getLogger("Main")
+logger.debug("Logging initialized in PID %d", os.getpid())
+
 
 async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivAPI]:
     """Main function to start the bot with multiple tasks and return historical data."""
@@ -39,9 +46,9 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
 
         logger.debug("Initializing DerivAPI...")
         api = DerivAPI(
-            endpoint=config.EndPoint,
+            #endpoint=config.EndPoint,
             app_id=config.APP_ID,
-            api_token=config.DERIV_API_TOKEN if config.DERIV_API_TOKEN else None,
+            #api_token=config.DERIV_API_TOKEN if config.DERIV_API_TOKEN else None,
         )
         response = await api.ping({"ping": 1})
         logger.debug("Ping response: %s", response)
@@ -78,14 +85,25 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
             timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) - 86400
         )
         end = datetime.now(tz=timezone.utc)
+
         logger.info("Fetching historical prices for frxEURUSD...")
-        historical_data = await asyncio.wait_for(
-            bot.grab_historical_prices(start, end, symbols=["frxEURUSD"]), timeout=30
-        )
-        if "frxEURUSD" in historical_data and historical_data["frxEURUSD"]["candles"]:
-            logger.info("First candle datetime: %s", historical_data["frxEURUSD"]["candles"][0]["datetime"])
-        else:
-            logger.warning("No historical data fetched for frxEURUSD")
+
+        try:
+            historical_data = await asyncio.wait_for(
+                bot.grab_historical_prices(start, end, symbols=["frxEURUSD"]), timeout=60
+            )
+            logger.debug("Raw historical data: %s", historical_data)
+            if historical_data and "frxEURUSD" in historical_data and "candles" in historical_data["frxEURUSD"]:
+                logger.info("First candle datetime: %s", historical_data["frxEURUSD"]["candles"][0]["datetime"])
+            else:
+                logger.warning("Historical data incomplete or empty: %s", historical_data)
+        except asyncio.TimeoutError:
+            logger.error("Historical data fetch timed out after 60 seconds")
+            historical_data = None
+        except Exception as e:
+            logger.error("Error fetching historical data: %s", str(e), exc_info=True)
+            historical_data = None
+
 
         logger.info("Starting ForexBot with multiple background tasks...")
         tasks = [
@@ -96,9 +114,9 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
             asyncio.create_task(run_blocking_tasks(bot, config), name="blocking_tasks"),
             asyncio.create_task(event_loop_watchdog(config), name="watchdog"),
         ]
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
-        logger.info("Main returning historical data while bot tasks run in background")
+        logger.info("All tasks scheduled")
         return historical_data, bot, api
 
     except Exception as e:
@@ -149,6 +167,12 @@ def process_blocking_operations(bot: ForexBot, config: Config):
         bot.create_tick_callback(symbols[0].strip())
 
 
+async def stop_bot(bot: ForexBot, api: DerivAPI):
+    logger.info("Stopping bot")
+    await bot.stop()
+    await api.clear()
+    logger.info("Bot stopped")
+
 if __name__ == "__main__":
     logger.info("Main process started with PID %d", os.getpid())
     try:
@@ -157,18 +181,19 @@ if __name__ == "__main__":
             return result, bot_instance, api_instance
 
         historical_data, bot, api = asyncio.run(run_with_cleanup(), debug=True)
+        logger.info("Main completed")
         if historical_data:
             logger.info("Historical data returned: %s", historical_data.get("frxEURUSD", {}).get("candles", [])[:1])
         else:
             logger.warning("No historical data returned from main()")
 
-        logger.info("Bot is running with multiple tasks in background. Press Ctrl+C to stop.")
+        logger.info("Bot running in background. Press Ctrl+C to stop.")
         loop = asyncio.get_event_loop()
         try:
             loop.run_forever()
         except KeyboardInterrupt:
-            logger.info("Received interrupt, stopping bot...")
-            asyncio.run(bot.stop(), api)
+            logger.info("Received interrupt, stopping...")
+            asyncio.run(stop_bot(bot, api))  # Fixed syntax: pass as separate args
             loop.close()
 
     except Exception as e:

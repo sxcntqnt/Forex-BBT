@@ -48,7 +48,9 @@ class ForexBot:
         self.strategy_manager = strategy_manager
         self.risk_manager = RiskManager(config)
         self.portfolio_manager = PortfolioManager(config)
-        self.backtester = Backtester(config, api, self.data_manager, self.strategy_manager)
+        self.backtester = Backtester(
+            config, api, self.data_manager, self.strategy_manager
+        )
         self.monitor = Monitor(self.config, self.backtester)
         self.performance_monitor = PerformanceMonitor(self.portfolio_manager)
         self.subscriptions: Dict[str, dict] = {}
@@ -122,8 +124,12 @@ class ForexBot:
         price: float = 0.0,
         stop_limit_price: float = 0.0,
     ) -> Backtester:
-        self.logger.info(f"Creating trade {trade_id} - {enter_or_exit} {long_or_short} order.")
-        trade = Backtester(self.config, self.api, self.data_manager, self.strategy_manager)
+        self.logger.info(
+            f"Creating trade {trade_id} - {enter_or_exit} {long_or_short} order."
+        )
+        trade = Backtester(
+            self.config, self.api, self.data_manager, self.strategy_manager
+        )
         trade.new_trade(
             trade_id=trade_id,
             order_type=order_type,
@@ -147,15 +153,91 @@ class ForexBot:
             self.logger.error(f"Trade {trade_id} not found.")
 
     async def grab_current_quotes(self) -> dict:
+        """
+        Fetches current quotes for all positions in the portfolio.
+
+        Returns:
+            dict: A dictionary of current quotes for the portfolio positions.
+        """
         self.logger.info("Fetching current quotes for all positions.")
         symbols = self.portfolio_manager.positions.keys()
         try:
             quotes = await self.api.active_symbols({"active_symbols": "brief"})
             self.logger.info(f"Fetched quotes for {len(symbols)} symbols.")
-            return {s["symbol"]: s for s in quotes["active_symbols"] if s["symbol"] in symbols}
+            return {
+                s["symbol"]: s
+                for s in quotes["active_symbols"]
+                if s["symbol"] in symbols
+            }
         except Exception as e:
             self.logger.error(f"Error fetching quotes: {str(e)}")
             return {}
+
+    async def fetch_historical_data(
+        self,
+        symbol: str,
+        start_timestamp: int,
+        end_timestamp: int,
+        bar_type: str = "minute",
+    ) -> Union[Dict, List]:
+        """
+        Fetches historical data for a single symbol.
+
+        Args:
+            symbol (str): The symbol to fetch historical data for.
+            start_timestamp (int): Start timestamp for the data request.
+            end_timestamp (int): End timestamp for the data request.
+            bar_type (str): Type of bar (default "minute").
+
+        Returns:
+            tuple: (symbol_data, symbol_prices) where symbol_data contains raw candle data
+                   and symbol_prices contains parsed candle data.
+        """
+        clean_symbol = symbol.replace("frx", "")
+        if not re.match(r"^[a-zA-Z]{2,30}$", clean_symbol):
+            self.logger.warning(f"Skipping invalid symbol: {symbol}")
+            return {}, []
+
+        args = {
+            "ticks_history": clean_symbol,
+            "start": start_timestamp,
+            "end": end_timestamp,
+            "style": "candles",
+            "granularity": 60 if bar_type == "minute" else 300,
+            "count": 5000,
+            "adjust_start_time": 1,
+        }
+        self.logger.debug(f"Requesting ticks_history with args: %s", args)
+
+        try:
+            response = await self.api.ticks_history(args)
+            self.logger.debug(f"Response for {symbol}: %s", response)
+            if "candles" not in response or not response["candles"]:
+                self.logger.warning(
+                    f"No candles data for {symbol} in response: %s", response
+                )
+                return {}, []
+            symbol_data = {"candles": response["candles"]}
+            symbol_prices = [
+                {
+                    "symbol": symbol,
+                    "open": float(candle["open"]),
+                    "close": float(candle["close"]),
+                    "high": float(candle["high"]),
+                    "low": float(candle["low"]),
+                    "volume": candle.get("volume", 0),
+                    "datetime": self.timestamp_utils.from_seconds(
+                        candle["epoch"]
+                    ),  # Changed to seconds
+                }
+                for candle in response["candles"]
+            ]
+            return symbol_data, symbol_prices
+        except Exception as e:
+            self.logger.error(
+                f"Error fetching data for {symbol}: %s", str(e), exc_info=True
+            )
+            return {}, []
 
     async def grab_historical_prices(
         self,
@@ -165,59 +247,45 @@ class ForexBot:
         bar_type: str = "minute",
         symbols: List[str] = None,
     ) -> Dict[str, Union[List[Dict], Dict]]:
-        self.logger.info(f"Fetching historical prices for {len(symbols or self.config.SYMBOLS)} symbols.")
+        """
+        Grabs historical price data for the given symbols and date range.
+
+        Args:
+            start_date (datetime): Start date for fetching the historical data.
+            end_date (datetime): End date for fetching the historical data.
+            bar_size (int): Size of the bars (default 1).
+            bar_type (str): Type of bar (default "minute").
+            symbols (List[str]): List of symbols to fetch data for (default is config.SYMBOLS).
+
+        Returns:
+            Dict[str, Union[List[Dict], Dict]]: A dictionary with the historical data.
+        """
+        self.logger.info(
+            f"Fetching historical prices for {len(symbols or self.config.SYMBOLS)} symbols."
+        )
         if not symbols:
             symbols = self.config.SYMBOLS
 
-        start_timestamp = self.timestamp_utils.to_milliseconds(start_date)
-        end_timestamp = self.timestamp_utils.to_milliseconds(end_date)
+        start_timestamp = self.timestamp_utils.to_seconds(
+            start_date
+        )  # Changed to seconds
+        end_timestamp = self.timestamp_utils.to_seconds(end_date)  # Changed to seconds
         historical_data = {}
         new_prices = []
 
-        async def fetch_historical_data(symbol):
-            clean_symbol = symbol.replace("frx", "")
-            if not re.match(r"^[a-zA-Z]{2,30}$", clean_symbol):
-                self.logger.warning(f"Skipping invalid symbol: {symbol}")
-                return {}, []
+        tasks = [
+            self.fetch_historical_data(symbol, start_timestamp, end_timestamp, bar_type)
+            for symbol in symbols
+        ]
+        results = await asyncio.gather(
+            *tasks, return_exceptions=True
+        )  # Capture exceptions
 
-            args = {
-                "ticks_history": clean_symbol,
-                "start": start_timestamp,
-                "end": end_timestamp,
-                "style": "candles",
-                "granularity": 60 if bar_type == "minute" else 300,
-                "count": 5000,
-                "adjust_start_time": 1,
-            }
-
-            try:
-                response = await self.api.ticks_history(args)
-                if "candles" not in response:
-                    self.logger.warning(f"No candles data for {symbol}")
-                    return {}, []
-
-                symbol_data = {"candles": response["candles"]}
-                symbol_prices = [
-                    {
-                        "symbol": symbol,
-                        "open": float(candle["open"]),
-                        "close": float(candle["close"]),
-                        "high": float(candle["high"]),
-                        "low": float(candle["low"]),
-                        "volume": candle.get("volume", 0),
-                        "datetime": self.timestamp_utils.from_milliseconds(candle["epoch"]),
-                    }
-                    for candle in response["candles"]
-                ]
-                return symbol_data, symbol_prices
-            except Exception as e:
-                self.logger.error(f"Error fetching data for {symbol}: {e}")
-                return {}, []
-
-        tasks = [fetch_historical_data(symbol) for symbol in symbols]
-        results = await asyncio.gather(*tasks)
-
-        for symbol, (symbol_data, symbol_prices) in zip(symbols, results):
+        for symbol, result in zip(symbols, results):
+            if isinstance(result, Exception):
+                self.logger.error(f"Task for {symbol} failed: %s", str(result))
+                continue
+            symbol_data, symbol_prices = result
             if symbol_data:
                 historical_data[symbol] = symbol_data
             new_prices.extend(symbol_prices)
@@ -231,7 +299,9 @@ class ForexBot:
         end_date = datetime.now(tz=UTC)
         start_date = end_date - timedelta(days=1)
         for symbol in self.config.SYMBOLS:
-            data = await self.grab_historical_prices(start_date, end_date, 1, "minute", [symbol])
+            data = await self.grab_historical_prices(
+                start_date, end_date, 1, "minute", [symbol]
+            )
             if "aggregated" in data and data["aggregated"]:
                 latest_prices.append(data["aggregated"][-1])
         return latest_prices
@@ -244,7 +314,9 @@ class ForexBot:
         )
         next_bar_time = last_bar_time + timedelta(seconds=60)
         curr_bar_time = datetime.now(tz=timezone.utc)
-        time_to_wait = max(int(next_bar_time.timestamp() - curr_bar_time.timestamp()), 0)
+        time_to_wait = max(
+            int(next_bar_time.timestamp() - curr_bar_time.timestamp()), 0
+        )
         self.logger.info(f"Waiting {time_to_wait} seconds for next bar.")
         await asyncio.sleep(time_to_wait)
 
@@ -252,7 +324,9 @@ class ForexBot:
         self.stock_frame = DataManager(self.config, self.api, self.logger, data=data)
         return self.stock_frame
 
-    async def execute_signals(self, signals: List[pd.Series], trades_to_execute: dict) -> List[dict]:
+    async def execute_signals(
+        self, signals: List[pd.Series], trades_to_execute: dict
+    ) -> List[dict]:
         self.logger.info("Executing signals (placeholder implementation)")
         return []
 
@@ -265,16 +339,24 @@ class ForexBot:
             await f.write(json.dumps(order_response_dict, indent=4))
         return True
 
-    async def get_accounts(self, account_number: str = None, all_accounts: bool = False) -> dict:
+    async def get_accounts(
+        self, account_number: str = None, all_accounts: bool = False
+    ) -> dict:
         return {"DEMO123": {"balance": 10000}}
 
-    async def get_positions(self, account_number: str = None, all_accounts: bool = False) -> List[Dict]:
+    async def get_positions(
+        self, account_number: str = None, all_accounts: bool = False
+    ) -> List[Dict]:
         return []
 
-    def _parse_account_balances(self, accounts_response: Union[Dict, List]) -> List[Dict]:
+    def _parse_account_balances(
+        self, accounts_response: Union[Dict, List]
+    ) -> List[Dict]:
         return [{"account_number": "DEMO123", "cash_balance": 10000}]
 
-    def _parse_account_positions(self, positions_response: Union[List, Dict]) -> List[Dict]:
+    def _parse_account_positions(
+        self, positions_response: Union[List, Dict]
+    ) -> List[Dict]:
         return []
 
     async def run(self):
@@ -301,6 +383,7 @@ class ForexBot:
         def callback(data):
             self.data_manager.update(symbol, data)
             self.logger.debug(f"Tick for {symbol}: {data}")
+
         return callback
 
     async def check_trades(self):
@@ -338,7 +421,9 @@ class ForexBot:
         start_date = datetime.strptime(self.config.BACKTEST_START_DATE, "%Y-%m-%d")
         end_date = datetime.strptime(self.config.BACKTEST_END_DATE, "%Y-%m-%d")
         data = await self.grab_historical_prices(start_date, end_date)
-        self.data_manager = DataManager(self.config, self.api, self.logger, data=data["aggregated"])
+        self.data_manager = DataManager(
+            self.config, self.api, self.logger, data=data["aggregated"]
+        )
         self.logger.info("DataManager initialized with historical data.")
 
     async def stop(self):
