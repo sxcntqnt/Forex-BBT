@@ -35,6 +35,9 @@ APP_ID=
 
    The bot will start running, and you can access the web interface at http://localhost:8080.
 
+   #Checkout Arbitagelab (https://hudsonthames.org/arbitragelab/)
+   #Checkout GeneticAlgos(https://slicematrix.github.io/python-docs/)
+
 11. To interact with the bot through the web interface, you can use curl commands or any HTTP client:
 
    Get bot status: curl http://localhost:8080/status
