@@ -81,29 +81,35 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
             raise
 
         timestamp_utils = TimestampUtils()
-        start = timestamp_utils.from_seconds(
-            timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) - 86400
-        )
-        end = datetime.now(tz=timezone.utc)
+        start_ts = timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) - 86400
+        
+        end_ts = timestamp_utils.to_seconds(datetime.now(tz=timezone.utc))
 
         logger.info("Fetching historical prices for frxEURUSD...")
 
         try:
-            historical_data = await asyncio.wait_for(
-                bot.grab_historical_prices(start, end, symbols=["frxEURUSD"]), timeout=60
+            historical_data, prices = await asyncio.wait_for(
+                bot.grab_historical_data(start_ts, end_ts, "frxEURUSD"), timeout=60
             )
             logger.debug("Raw historical data: %s", historical_data)
-            if historical_data and "frxEURUSD" in historical_data and "candles" in historical_data["frxEURUSD"]:
-                logger.info("First candle datetime: %s", historical_data["frxEURUSD"]["candles"][0]["datetime"])
+            
+            if not historical_data:
+                logger.warning("Historical data is None or empty")
+            elif "frxEURUSD" not in historical_data:
+                logger.warning("No data for frxEURUSD: %s", historical_data)
+            elif "candles" not in historical_data["frxEURUSD"] or not historical_data["frxEURUSD"]["candles"]:
+                logger.warning("No candles data for frxEURUSD: %s", historical_data["frxEURUSD"])
             else:
-                logger.warning("Historical data incomplete or empty: %s", historical_data)
+                logger.info("First candle datetime: %s", historical_data["frxEURUSD"]["candles"][0]["datetime"])
+                return historical_data  # Optionally return data if needed
         except asyncio.TimeoutError:
             logger.error("Historical data fetch timed out after 60 seconds")
             historical_data = None
         except Exception as e:
-            logger.error("Error fetching historical data: %s", str(e), exc_info=True)
+            logger.error("Error fetching historical data: %s, type: %s", str(e), type(e).__name__, exc_info=True)
             historical_data = None
-
+        
+        return historical_data  # Return None or data for downstream use
 
         logger.info("Starting ForexBot with multiple background tasks...")
         tasks = [
