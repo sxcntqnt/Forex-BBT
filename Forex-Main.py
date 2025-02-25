@@ -52,7 +52,9 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
             raise ConnectionError("API ping failed")
 
         data_manager = DataManager(config=config, api=api, logger=logger)
-        strategy_manager = StrategyManager(data_manager=data_manager, api=api, logger=logger)
+        strategy_manager = StrategyManager(
+            data_manager=data_manager, api=api, logger=logger
+        )
 
         bot = ForexBot(
             config=config,
@@ -79,40 +81,60 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
 
         # Fetching historical data
         timestamp_utils = TimestampUtils()
-        start_ts = timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) - 86400  # 1 day ago
-        end_ts = timestamp_utils.to_seconds(datetime.now(tz=timezone.utc))
+        start_ts = (
+            timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) - 172800
+        )  # 1 day ago
+        end_ts = ( 
+            timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) -86400
+        
+        )
 
         logger.info("Fetching historical prices for frxEURUSD...")
         try:
             # Fetch historical data for all symbols in config.SYMBOLS
             for symbol in config.SYMBOLS:
                 raw_data, prices = await asyncio.wait_for(
-                    data_manager.grab_historical_data(start_ts, end_ts, symbol), timeout=60
+                    data_manager.grab_historical_data(start_ts, end_ts, symbol),
+                    timeout=60,
                 )
                 historical_data[symbol] = raw_data  # Store raw data per symbol
                 logger.debug("Raw historical data for %s: %s", symbol, raw_data)
 
-                if not raw_data or "candles" not in raw_data or not raw_data["candles"]:
-                    logger.warning("No candles data for %s: %s", symbol, raw_data)
-                else:
-                    # Convert epoch to datetime for logging (optional)
+                if raw_data["candles"]:
                     first_candle = raw_data["candles"][0]
-                    first_candle["datetime"] = datetime.fromtimestamp(first_candle["epoch"]).isoformat()
-                    logger.info("First candle datetime for %s: %s", symbol, first_candle["datetime"])
+                    first_candle["datetime"] = datetime.fromtimestamp(
+                        first_candle["epoch"]
+                    ).isoformat()
+                    logger.info(
+                        "First candle datetime for %s: %s",
+                        symbol,
+                        first_candle["datetime"],
+                    )
+                else:
+                    logger.info("No historical data for %s", symbol)
 
         except asyncio.TimeoutError:
             logger.error("Historical data fetch timed out after 60 seconds")
             historical_data = None
         except Exception as e:
-            logger.error("Error fetching historical data: %s, type: %s", str(e), type(e).__name__, exc_info=True)
-            historical_data = None
+            logger.error(
+                "Error fetching historical data: %s, type: %s",
+                str(e),
+                type(e).__name__,
+                exc_info=True,
+            )
+            historical_data[symbol] = {"candles": []}
 
         # Starting ForexBot with multiple background tasks
         logger.info("Starting ForexBot with multiple background tasks...")
         tasks = [
             asyncio.create_task(bot.run(), name="bot_run"),
-            asyncio.create_task(bot.data_manager.start_subscriptions(), name="data_subs"),
-            asyncio.create_task(bot.initialize_data_manager(data_manager), name="data_init"),
+            asyncio.create_task(
+                bot.data_manager.start_subscriptions(), name="data_subs"
+            ),
+            asyncio.create_task(
+                bot.initialize_data_manager(data_manager), name="data_init"
+            ),
             asyncio.create_task(start_web_interface(bot), name="web_interface"),
             asyncio.create_task(run_blocking_tasks(bot, config), name="blocking_tasks"),
             asyncio.create_task(event_loop_watchdog(config), name="watchdog"),
@@ -139,6 +161,7 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
     finally:
         tracemalloc.stop()
 
+
 async def event_loop_watchdog(config: Config):
     """Monitors event loop health indefinitely."""
     logger.info("Watchdog started in process %d", os.getpid())
@@ -148,8 +171,11 @@ async def event_loop_watchdog(config: Config):
         delay = time.monotonic() - start_time - config.WATCHDOG_INTERVAL
         if delay > config.STARVATION_THRESHOLD:
             logger.warning("Event loop starvation detected! Delay: %.2fs", delay)
-        current_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        current_tasks = [
+            t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+        ]
         logger.debug("Active tasks: %d", len(current_tasks))
+
 
 async def run_blocking_tasks(bot: ForexBot, config: Config):
     """Run CPU-intensive tasks in executor indefinitely."""
@@ -157,15 +183,20 @@ async def run_blocking_tasks(bot: ForexBot, config: Config):
     loop = asyncio.get_event_loop()
     while True:
         try:
-            await loop.run_in_executor(None, partial(process_blocking_operations, bot, config))
+            await loop.run_in_executor(
+                None, partial(process_blocking_operations, bot, config)
+            )
             await asyncio.sleep(1)
         except Exception as e:
             logger.error("Blocking task error: %s", str(e))
             await asyncio.sleep(5)
 
+
 def process_blocking_operations(bot: ForexBot, config: Config):
     """Process blocking operations."""
-    symbols = config.SYMBOLS.split(",") if isinstance(config.SYMBOLS, str) else config.SYMBOLS
+    symbols = (
+        config.SYMBOLS.split(",") if isinstance(config.SYMBOLS, str) else config.SYMBOLS
+    )
     if symbols:
         bot.create_tick_callback(symbols[0].strip())
 
@@ -180,6 +211,7 @@ async def stop_bot(bot: ForexBot, api: DerivAPI):
 if __name__ == "__main__":
     logger.info("Main process started with PID %d", os.getpid())
     try:
+
         async def run_with_cleanup():
             try:
                 result = await main()  # Call the main function
@@ -194,7 +226,10 @@ if __name__ == "__main__":
 
         # Check if result is valid before unpacking
         if result is None or len(result) != 3:
-            logger.critical("Unexpected result from main function. Expected 3 values, got: %s", result)
+            logger.critical(
+                "Unexpected result from main function. Expected 3 values, got: %s",
+                result,
+            )
             sys.exit(1)
 
         historical_data, bot, api = result  # Unpack the result safely

@@ -70,7 +70,7 @@ class DataManager:
             self.logger.debug(
                 f"Received data for symbol {symbol}: {data} (Count: {count})"
             )
-            self.update(symbol, data)
+            asyncio.get_event_loop().create_task(self.update(symbol, data))
 
         return cb
 
@@ -207,7 +207,9 @@ class DataManager:
             "ticks_history": symbol,
             "start": start_timestamp,
             "end": end_timestamp,
-            "granularity": 60 if bar_type == "minute" else 300,  # Set granularity based on bar type
+            "granularity": (
+                60 if bar_type == "minute" else 300
+            ),  # Set granularity based on bar type
             "count": 5000,  # Limit the number of ticks
             "adjust_start_time": 1,  # Adjust start time if necessary
         }
@@ -218,8 +220,14 @@ class DataManager:
             response = await self.api.ticks_history(args)
             self.logger.debug(f"Response for {symbol}: {response}")
 
+            if "error" in response:
+                self.logger.error(f"API error for {symbol}: {response['error']}")
+                raise Exception(f"API error: {response['error']['message']}")
+
             if "candles" not in response or not response["candles"]:
-                self.logger.warning(f"No candles data for {symbol} in response: {response}")
+                self.logger.warning(
+                    f"No candles data for {symbol} in response: {response}"
+                )
                 raise ValueError(f"No historical data available for {symbol}.")
 
             # Process the response to extract relevant data
@@ -232,7 +240,9 @@ class DataManager:
                     "close": float(candle["close"]),
                     "high": float(candle["high"]),
                     "low": float(candle["low"]),
-                    "quote": float(candle["close"]),  # Using close as quote for consistency
+                    "quote": float(
+                        candle["close"]
+                    ),  # Using close as quote for consistency
                 }
                 for candle in response["candles"]
             ]

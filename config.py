@@ -29,7 +29,8 @@ class Config:
         )
 
         # STANDARD settings
-        self.SYMBOLS = self.config["Settings"].get("SYMBOLS")
+        symbols_str = self.config["Settings"].get("SYMBOLS")
+        self.SYMBOLS = [s.strip() for s in symbols_str.split(",")]
         self.TIMEFRAME = self.config["Settings"].get("TIMEFRAME")
         self.RISK_PERCENTAGE = self.config["Settings"].getfloat(
             "RISK_PERCENTAGE", fallback=0.01

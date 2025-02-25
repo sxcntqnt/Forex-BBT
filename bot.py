@@ -67,8 +67,32 @@ class ForexBot:
     async def initialize(self):
         """Asynchronous initialization method."""
         await self._verify_api_connection()
-        for symbol in self.config.SYMBOLS:
-            await self.subscribe_to_symbol(symbol, self.api)
+
+    async def initialize_data_manager(self, data_manager):
+        """Initializes the DataManager with historical data for specified symbols."""
+        start_date = datetime.strptime(self.config.BACKTEST_START_DATE, "%Y-%m-%d")
+        end_date = datetime.strptime(self.config.BACKTEST_END_DATE, "%Y-%m-%d")
+
+        # Convert to timestamps
+        start_ts = self.timestamp_utils.to_seconds(start_date)
+        end_ts = self.timestamp_utils.to_seconds(end_date)
+
+        # Loop over symbols or specify one
+        for symbol in self.config.SYMBOLS:  # Assuming SYMBOLS is a list of symbols
+            symbol_data, symbol_prices = await data_manager.grab_historical_data(
+                start_ts, end_ts, symbol
+            )
+
+            # Initialize DataManager with historical data
+            self.data_manager = DataManager(
+                self.config,
+                self.api,
+                self.logger,
+                data={symbol: {"raw": symbol_data, "prices": symbol_prices}},
+            )
+            self.logger.info(
+                f"DataManager initialized with historical data for {symbol}."
+            )
 
     async def run(self):
         self.running = True
@@ -190,7 +214,6 @@ class ForexBot:
             self.logger.error(f"Error fetching quotes: {str(e)}")
             return {}
 
-
     async def get_latest_bar(self) -> List[dict]:
         latest_prices = []
         end_date = datetime.now(tz=UTC)
@@ -216,7 +239,6 @@ class ForexBot:
         )
         self.logger.info(f"Waiting {time_to_wait} seconds for next bar.")
         await asyncio.sleep(time_to_wait)
-
 
     async def create_stock_frame(self, data: List[dict]) -> DataManager:
         self.stock_frame = DataManager(self.config, self.api, self.logger, data=data)
@@ -597,7 +619,6 @@ class ForexBot:
 
         await self.monitor.check_open_positions(self.api)
 
-
     async def enter_trade(self, symbol, contract_type="CALL"):
         """Enter a trade with a specified contract type."""
         if not self._is_market_open():
@@ -620,33 +641,42 @@ class ForexBot:
         )
         self.monitor.add_position(contract)
         self.portfolio_manager.add_trade(symbol, contract)
-        self.active_trades[symbol] = {'contract_id': contract['contract_id']}  # Store active trade
+        self.active_trades[symbol] = {
+            "contract_id": contract["contract_id"]
+        }  # Store active trade
         self.logger.info(f"Entered trade: {contract}")
 
     async def exit_trade(self, symbol):
         """Exit a trade for the given symbol."""
         self.logger.info(f"Checking for open trades to exit for {symbol}.")
-        
+
         # Check if there are any active trades for the symbol
         if symbol in self.active_trades:
             trade = self.active_trades[symbol]
             try:
                 # Assuming the trade object has an ID or reference to the contract
-                contract_id = trade['contract_id']  # Adjust based on your trade structure
-                
+                contract_id = trade[
+                    "contract_id"
+                ]  # Adjust based on your trade structure
+
                 # Call the API to close the trade
                 response = await self.api.close_position(contract_id)
-                if response.get('error'):
-                    self.logger.error(f"Error closing trade for {symbol}: {response['error']}")
+                if response.get("error"):
+                    self.logger.error(
+                        f"Error closing trade for {symbol}: {response['error']}"
+                    )
                 else:
-                    self.logger.info(f"Successfully exited trade for {symbol}. Response: {response}")
+                    self.logger.info(
+                        f"Successfully exited trade for {symbol}. Response: {response}"
+                    )
                     # Remove the trade from active trades
                     del self.active_trades[symbol]
             except Exception as e:
-                self.logger.error(f"Exception while exiting trade for {symbol}: {str(e)}")
+                self.logger.error(
+                    f"Exception while exiting trade for {symbol}: {str(e)}"
+                )
         else:
             self.logger.warning(f"No active trade found for {symbol}.")
-
 
     async def unsubscribe(self):
         """Unsubscribe from all symbols."""
@@ -656,28 +686,6 @@ class ForexBot:
             except Exception as e:
                 self.logger.error(f"Error unsubscribing from {symbol}: {e}")
         self.subscriptions.clear()
-
-    async def initialize_data_manager(self, data_manager):
-        """Initializes the DataManager with historical data for specified symbols."""
-        start_date = datetime.strptime(self.config.BACKTEST_START_DATE, "%Y-%m-%d")
-        end_date = datetime.strptime(self.config.BACKTEST_END_DATE, "%Y-%m-%d")
-        
-        # Convert to timestamps
-        start_ts = self.timestamp_utils.to_seconds(start_date)
-        end_ts = self.timestamp_utils.to_seconds(end_date)
-        
-        # Loop over symbols or specify one
-        for symbol in self.config.SYMBOLS:  # Assuming SYMBOLS is a list of symbols
-            symbol_data, symbol_prices = await data_manager.grab_historical_data(start_ts, end_ts, symbol)
-            
-            # Initialize DataManager with historical data
-            self.data_manager = DataManager(
-                self.config, 
-                self.api, 
-                self.logger, 
-                data={symbol: {"raw": symbol_data, "prices": symbol_prices}}
-            )
-            self.logger.info(f"DataManager initialized with historical data for {symbol}.")
 
     async def stop(self):
         self.running = False
