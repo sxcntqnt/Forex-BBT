@@ -84,19 +84,21 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
 
         logger.info("Fetching historical prices for frxEURUSD...")
         try:
-            historical_data, prices = await asyncio.wait_for(
-                bot.grab_historical_data(start_ts, end_ts, config.SYMBOLS), timeout=60
-            )
-            logger.debug("Raw historical data: %s", historical_data)
+            # Fetch historical data for all symbols in config.SYMBOLS
+            for symbol in config.SYMBOLS:
+                raw_data, prices = await asyncio.wait_for(
+                    data_manager.grab_historical_data(start_ts, end_ts, symbol), timeout=60
+                )
+                historical_data[symbol] = raw_data  # Store raw data per symbol
+                logger.debug("Raw historical data for %s: %s", symbol, raw_data)
 
-            if not historical_data:
-                logger.warning("Historical data is None or empty")
-            elif "frxEURUSD" not in historical_data:
-                logger.warning("No data for frxEURUSD: %s", historical_data)
-            elif "candles" not in historical_data["frxEURUSD"] or not historical_data["frxEURUSD"]["candles"]:
-                logger.warning("No candles data for frxEURUSD: %s", historical_data["frxEURUSD"])
-            else:
-                logger.info("First candle datetime: %s", historical_data["frxEURUSD"]["candles"][0]["datetime"])
+                if not raw_data or "candles" not in raw_data or not raw_data["candles"]:
+                    logger.warning("No candles data for %s: %s", symbol, raw_data)
+                else:
+                    # Convert epoch to datetime for logging (optional)
+                    first_candle = raw_data["candles"][0]
+                    first_candle["datetime"] = datetime.fromtimestamp(first_candle["epoch"]).isoformat()
+                    logger.info("First candle datetime for %s: %s", symbol, first_candle["datetime"])
 
         except asyncio.TimeoutError:
             logger.error("Historical data fetch timed out after 60 seconds")
@@ -189,7 +191,7 @@ if __name__ == "__main__":
 
         # Unpack the result safely
         result = asyncio.run(run_with_cleanup(), debug=True)
-        
+
         # Check if result is valid before unpacking
         if result is None or len(result) != 3:
             logger.critical("Unexpected result from main function. Expected 3 values, got: %s", result)
@@ -198,8 +200,10 @@ if __name__ == "__main__":
         historical_data, bot, api = result  # Unpack the result safely
 
         logger.info("Main completed")
-        if historical_data:
-            logger.info("Historical data returned: %s", historical_data.get("frxEURUSD", {}).get("candles", [])[:1])
+        if historical_data and any(historical_data.values()):
+            for symbol, data in historical_data.items():
+                if data and "candles" in data and data["candles"]:
+                    logger.info("First candle for %s: %s", symbol, data["candles"][0])
         else:
             logger.warning("No historical data returned from main()")
 
