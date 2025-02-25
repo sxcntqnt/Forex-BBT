@@ -1,4 +1,5 @@
 import pandas as pd
+from datetime import datetime
 import asyncio
 from config import Config
 from deriv_api import DerivAPI

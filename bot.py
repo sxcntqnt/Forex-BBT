@@ -657,7 +657,7 @@ class ForexBot:
                 self.logger.error(f"Error unsubscribing from {symbol}: {e}")
         self.subscriptions.clear()
 
-    async def initialize_data_manager(self):
+    async def initialize_data_manager(self, data_manager):
         """Initializes the DataManager with historical data for specified symbols."""
         start_date = datetime.strptime(self.config.BACKTEST_START_DATE, "%Y-%m-%d")
         end_date = datetime.strptime(self.config.BACKTEST_END_DATE, "%Y-%m-%d")
@@ -668,7 +668,7 @@ class ForexBot:
         
         # Loop over symbols or specify one
         for symbol in self.config.SYMBOLS:  # Assuming SYMBOLS is a list of symbols
-            symbol_data, symbol_prices = await self.grab_historical_data(start_ts, end_ts, symbol)
+            symbol_data, symbol_prices = await data_manager.grab_historical_data(start_ts, end_ts, symbol)
             
             # Initialize DataManager with historical data
             self.data_manager = DataManager(

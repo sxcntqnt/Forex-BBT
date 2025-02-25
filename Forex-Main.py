@@ -112,7 +112,7 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
         tasks = [
             asyncio.create_task(bot.run(), name="bot_run"),
             asyncio.create_task(bot.data_manager.start_subscriptions(), name="data_subs"),
-            asyncio.create_task(bot.initialize_data_manager(), name="data_init"),
+            asyncio.create_task(bot.initialize_data_manager(data_manager), name="data_init"),
             asyncio.create_task(start_web_interface(bot), name="web_interface"),
             asyncio.create_task(run_blocking_tasks(bot, config), name="blocking_tasks"),
             asyncio.create_task(event_loop_watchdog(config), name="watchdog"),
