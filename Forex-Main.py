@@ -45,11 +45,7 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
         logger.info("Initialized config with symbols: %s", config.SYMBOLS)
 
         logger.debug("Initializing DerivAPI...")
-        api = DerivAPI(
-            #endpoint=config.EndPoint,
-            app_id=config.APP_ID,
-            #api_token=config.DERIV_API_TOKEN if config.DERIV_API_TOKEN else None,
-        )
+        api = DerivAPI(app_id=config.APP_ID)
         response = await api.ping({"ping": 1})
         logger.debug("Ping response: %s", response)
         if response.get("ping") != "pong":
@@ -66,6 +62,7 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
             api=api,
         )
 
+        # Authorization
         try:
             auth_response = await asyncio.wait_for(
                 api.authorize({"authorize": config.DERIV_API_TOKEN}), timeout=15
@@ -80,19 +77,18 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
             logger.error("Authorization failed: %s", str(e))
             raise
 
+        # Fetching historical data
         timestamp_utils = TimestampUtils()
-        start_ts = timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) - 86400
-        
+        start_ts = timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) - 86400  # 1 day ago
         end_ts = timestamp_utils.to_seconds(datetime.now(tz=timezone.utc))
 
         logger.info("Fetching historical prices for frxEURUSD...")
-
         try:
             historical_data, prices = await asyncio.wait_for(
-                bot.grab_historical_data(start_ts, end_ts, "frxEURUSD"), timeout=60
+                bot.grab_historical_data(start_ts, end_ts, config.SYMBOLS), timeout=60
             )
             logger.debug("Raw historical data: %s", historical_data)
-            
+
             if not historical_data:
                 logger.warning("Historical data is None or empty")
             elif "frxEURUSD" not in historical_data:
@@ -101,16 +97,15 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
                 logger.warning("No candles data for frxEURUSD: %s", historical_data["frxEURUSD"])
             else:
                 logger.info("First candle datetime: %s", historical_data["frxEURUSD"]["candles"][0]["datetime"])
-                return historical_data  # Optionally return data if needed
+
         except asyncio.TimeoutError:
             logger.error("Historical data fetch timed out after 60 seconds")
             historical_data = None
         except Exception as e:
             logger.error("Error fetching historical data: %s, type: %s", str(e), type(e).__name__, exc_info=True)
             historical_data = None
-        
-        return historical_data  # Return None or data for downstream use
 
+        # Starting ForexBot with multiple background tasks
         logger.info("Starting ForexBot with multiple background tasks...")
         tasks = [
             asyncio.create_task(bot.run(), name="bot_run"),
@@ -120,24 +115,24 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
             asyncio.create_task(run_blocking_tasks(bot, config), name="blocking_tasks"),
             asyncio.create_task(event_loop_watchdog(config), name="watchdog"),
         ]
-        await asyncio.sleep(2)
+        await asyncio.sleep(2)  # Allow tasks to start
 
         logger.info("All tasks scheduled")
-        return historical_data, bot, api
+        return historical_data, bot, api  # Return the expected values
 
     except Exception as e:
         logger.critical("Critical error in main: %s", str(e), exc_info=True)
         for task in tasks:
-            task.cancel()
+            task.cancel()  # Cancel all tasks
             try:
-                await task
+                await task  # Await cancellation
             except asyncio.CancelledError:
                 logger.debug("Task %s cancelled during error cleanup", task.get_name())
         if bot:
-            await bot.stop()
+            await bot.stop()  # Ensure the bot is stopped
         if api:
-            await api.clear()
-        raise
+            await api.clear()  # Clear the API
+        raise  # Re-raise the exception for further handling
 
     finally:
         tracemalloc.stop()
@@ -179,14 +174,29 @@ async def stop_bot(bot: ForexBot, api: DerivAPI):
     await api.clear()
     logger.info("Bot stopped")
 
+
 if __name__ == "__main__":
     logger.info("Main process started with PID %d", os.getpid())
     try:
         async def run_with_cleanup():
-            result, bot_instance, api_instance = await main()
-            return result, bot_instance, api_instance
+            try:
+                result = await main()  # Call the main function
+                logger.debug(f"Main returned: {result}")  # Log the result for debugging
+                return result
+            except Exception as e:
+                logger.error(f"Error in main function: {str(e)}")
+                return None  # Return None or a default value in case of an error
 
-        historical_data, bot, api = asyncio.run(run_with_cleanup(), debug=True)
+        # Unpack the result safely
+        result = asyncio.run(run_with_cleanup(), debug=True)
+        
+        # Check if result is valid before unpacking
+        if result is None or len(result) != 3:
+            logger.critical("Unexpected result from main function. Expected 3 values, got: %s", result)
+            sys.exit(1)
+
+        historical_data, bot, api = result  # Unpack the result safely
+
         logger.info("Main completed")
         if historical_data:
             logger.info("Historical data returned: %s", historical_data.get("frxEURUSD", {}).get("candles", [])[:1])

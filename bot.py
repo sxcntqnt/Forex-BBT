@@ -37,9 +37,6 @@ class ForexBot:
         paper_trading: bool = True,
     ):
         """Central trading bot with dependency injection."""
-        # Verify API connection
-        asyncio.create_task(self._verify_api_connection())
-
         self.config = config
         self.paper_trading = paper_trading
         self.logger = logger
@@ -67,17 +64,37 @@ class ForexBot:
         self._bar_size = 1
         self._bar_type = "minute"
 
+    async def initialize(self):
+        """Asynchronous initialization method."""
+        await self._verify_api_connection()
+        for symbol in self.config.SYMBOLS:
+            await self.subscribe_to_symbol(symbol, self.api)
+
+    async def run(self):
+        self.running = True
+        self.logger.info("ForexBot started running.")
+        await self.initialize()  # Call the asynchronous initialization method
+        while self.running:
+            await self.check_trades()
+            await self.performance_monitor.update(self.portfolio_manager)
+            await asyncio.sleep(1)
+
+    def _is_market_open(self) -> bool:
+        """Check if the market is open today."""
+        now = datetime.now(tz=timezone.utc)
+        # Example: Check if today is a weekday (Monday to Friday)
+        if now.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+            self.logger.warning("Market is closed on weekends.")
+            return False
+        # Add additional checks for specific market hours
+        return self._market_open(13, 20)  # Example: Regular market hours
+
     def _market_open(self, start_hour: int, end_hour: int) -> bool:
         """Check if the market is open based on the given start and end hours."""
         now = datetime.now(tz=timezone.utc)
-        start_time = self.timestamp_utils.to_seconds(
-            now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
-        )
-        end_time = self.timestamp_utils.to_seconds(
-            now.replace(hour=end_hour, minute=0, second=0, microsecond=0)
-        )
-        current_time = self.timestamp_utils.to_seconds(now)
-        return start_time <= current_time <= end_time
+        start_time = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        end_time = now.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+        return start_time <= now <= end_time
 
     @property
     def pre_market_open(self) -> bool:
@@ -150,65 +167,75 @@ class ForexBot:
         end_timestamp: int,
         symbol: str,
         bar_type: str = "minute",
-    ) -> Tuple[Dict, List]:
-        """
-        Fetches historical data for a single symbol.
+    ) -> Union[Dict, List]:
+        """Fetches historical data for a single symbol.
 
         Args:
-            symbol (str): The symbol to fetch historical data for.
-            start_timestamp (int): Start timestamp for the data request (Unix seconds).
-            end_timestamp (int): End timestamp for the data request (Unix seconds).
-            bar_type (str): Type of bar (default "minute").
+            start_timestamp (int): Start time in seconds or datetime object
+            end_timestamp (int): End time in seconds or datetime object
+            symbol (str): Trading symbol to fetch data for
+            bar_type (str): Type of bars to fetch ('minute' or other)
 
         Returns:
-            tuple: (symbol_data, symbol_prices) where symbol_data contains raw candle data
-                   and symbol_prices contains parsed candle data.
-        """
-        # Convert datetime to seconds if provided
-        if isinstance(start_timestamp, datetime):
-            start_timestamp = self.timestamp_utils.to_seconds(start_timestamp)
-        if isinstance(end_timestamp, datetime):
-            end_timestamp = self.timestamp_utils.to_seconds(end_timestamp)
+            Tuple containing dictionary of raw candle data and list of processed prices
 
+        Raises:
+            ValueError: If no historical data is available
+            Exception: For other API or processing errors
+        """
+        # Convert to seconds if datetime objects are passed
+        if isinstance(start_timestamp, datetime):
+            start_timestamp = int(start_timestamp.timestamp())
+        if isinstance(end_timestamp, datetime):
+            end_timestamp = int(end_timestamp.timestamp())
+
+        # Prepare the arguments for the ticks_history API call
         args = {
+            "ticks_history": symbol,
             "start": start_timestamp,
             "end": end_timestamp,
-            "ticks_history": symbol,
-            "style": "candles",
-            "granularity": 60 if bar_type == "minute" else 300,
-            "count": 5000,
-            "adjust_start_time": 1,
+            "granularity": 60 if bar_type == "minute" else 300,  # Set granularity based on bar type
+            "count": 5000,  # Limit the number of ticks
+            "adjust_start_time": 1,  # Adjust start time if necessary
         }
-        self.logger.debug(f"Requesting ticks_history with args: %s", args)
+
+        self.logger.debug(f"Requesting ticks_history with args: {args}")
 
         try:
             response = await self.api.ticks_history(args)
-            self.logger.debug(f"Response for {symbol}: %s", response)
+            self.logger.debug(f"Response for {symbol}: {response}")
+
             if "candles" not in response or not response["candles"]:
-                self.logger.warning(
-                    f"No candles data for {symbol} in response: %s", response
-                )
-                return {}, []
+                self.logger.warning(f"No candles data for {symbol} in response: {response}")
+                raise ValueError(f"No historical data available for {symbol}.")
+
+            # Process the response to extract relevant data
             symbol_data = {"candles": response["candles"]}
             symbol_prices = [
                 {
                     "symbol": symbol,
+                    "timestamp": candle["epoch"],
                     "open": float(candle["open"]),
                     "close": float(candle["close"]),
                     "high": float(candle["high"]),
                     "low": float(candle["low"]),
-                    "volume": candle.get("volume", 0),
-                    "datetime": self.timestamp_utils.from_seconds(candle["epoch"]),
+                    "quote": float(candle["close"]),  # Using close as quote for consistency
                 }
                 for candle in response["candles"]
             ]
-            return symbol_data, symbol_prices
-        except Exception as e:
-            self.logger.error(
-                f"Error fetching data for {symbol}: %s", str(e), exc_info=True
-            )
-            return {}, []
 
+            # Update the data_frames with historical data
+            if symbol in self.data_frames:
+                historical_df = pd.DataFrame(symbol_prices)
+                self.data_frames[symbol] = pd.concat(
+                    [self.data_frames[symbol], historical_df]
+                ).tail(self.max_data_points)
+            
+            return symbol_data, symbol_prices
+
+        except Exception as e:
+            self.logger.error(f"Error fetching data for {symbol}: {str(e)}")
+            raise
     async def delete_trade(self, trade_id: str) -> None:
         self.logger.info(f"Attempting to delete trade {trade_id}.")
         if trade_id in self.trades:
@@ -390,46 +417,28 @@ class ForexBot:
         return order_dict
 
     async def save_orders(self, order_response_dict: dict) -> bool:
-        """Saves the order to a JSON file for further review asynchronously.
-
-        Arguments:
-        ----
-        order_response {dict} -- A single order response.
-
-        Returns:
-        ----
-        {bool} -- `True` if the orders were successfully saved.
-        """
-
-        def default(obj):
-            if isinstance(obj, bytes):
-                return str(obj)
-
-        # Define the folder.
-        folder: pathlib.PurePath = pathlib.Path(__file__).parents[1].joinpath("data")
-
-        # See if it exists, if not create it.
+        """Saves the order to a JSON file for further review asynchronously."""
+        folder = pathlib.Path(__file__).parents[1].joinpath("data")
         if not folder.exists():
             folder.mkdir()
 
-        # Define the file path.
         file_path = folder.joinpath("orders.json")
 
-        # First check if the file already exists.
-        if file_path.exists():
-            async with aiofiles.open(file_path, mode="r") as order_json:
-                orders_list = json.load(await order_json.read())
-        else:
-            orders_list = []
+        try:
+            if file_path.exists():
+                async with aiofiles.open(file_path, mode="r") as order_json:
+                    orders_list = json.load(await order_json.read())
+            else:
+                orders_list = []
 
-        # Combine both lists.
-        orders_list = orders_list + order_response_dict
+            orders_list += order_response_dict
 
-        # Write the new data back asynchronously.
-        async with aiofiles.open(file_path, mode="w+") as order_json:
-            await order_json.write(json.dumps(orders_list, indent=4, default=default))
-
-        return True
+            async with aiofiles.open(file_path, mode="w+") as order_json:
+                await order_json.write(json.dumps(orders_list, indent=4))
+            return True
+        except Exception as e:
+            self.logger.error(f"Error saving orders: {str(e)}")
+            return False
 
     async def get_account_balances(self) -> List[Dict]:
         """Fetches account balances asynchronously and parses them.
@@ -653,19 +662,31 @@ class ForexBot:
     async def check_trades(self):
         """Check if any trade conditions are met and execute if necessary."""
         for symbol in self.config.SYMBOLS:
+            # Check if we should enter a trade
             if await self.strategy_manager.should_enter_trade(symbol):
                 await self.enter_trade(symbol)
-        await self.monitor.check_open_positions(self.api)
-        await self.performance_monitor.update(self.portfolio_manager)
 
-    async def enter_trade(self, symbol):
+            # Check if we should exit a trade
+            if await self.strategy_manager.should_exit_trade(symbol):
+                await self.exit_trade(symbol)
+
+        await self.monitor.check_open_positions(self.api)
+
+
+    async def enter_trade(self, symbol, contract_type="CALL"):
+        """Enter a trade with a specified contract type."""
+        if not self._is_market_open():
+            self.logger.warning(f"Cannot enter trade for {symbol}: Market is closed.")
+            return
+
         if not self.risk_manager.can_enter_trade(symbol):
             self.logger.warning(f"Risk limit reached for {symbol}")
             return
+
         position_size = self.risk_manager.calculate_position_size(symbol)
         contract = await self.api.buy(
             {
-                "contract_type": "CALL",
+                "contract_type": contract_type,
                 "amount": position_size,
                 "symbol": symbol,
                 "duration": 5,
@@ -674,11 +695,41 @@ class ForexBot:
         )
         self.monitor.add_position(contract)
         self.portfolio_manager.add_trade(symbol, contract)
+        self.active_trades[symbol] = {'contract_id': contract['contract_id']}  # Store active trade
         self.logger.info(f"Entered trade: {contract}")
 
+    async def exit_trade(self, symbol):
+        """Exit a trade for the given symbol."""
+        self.logger.info(f"Checking for open trades to exit for {symbol}.")
+        
+        # Check if there are any active trades for the symbol
+        if symbol in self.active_trades:
+            trade = self.active_trades[symbol]
+            try:
+                # Assuming the trade object has an ID or reference to the contract
+                contract_id = trade['contract_id']  # Adjust based on your trade structure
+                
+                # Call the API to close the trade
+                response = await self.api.close_position(contract_id)
+                if response.get('error'):
+                    self.logger.error(f"Error closing trade for {symbol}: {response['error']}")
+                else:
+                    self.logger.info(f"Successfully exited trade for {symbol}. Response: {response}")
+                    # Remove the trade from active trades
+                    del self.active_trades[symbol]
+            except Exception as e:
+                self.logger.error(f"Exception while exiting trade for {symbol}: {str(e)}")
+        else:
+            self.logger.warning(f"No active trade found for {symbol}.")
+
+
     async def unsubscribe(self):
+        """Unsubscribe from all symbols."""
         for symbol in self.subscriptions:
-            await self.api.forget(symbol)
+            try:
+                await self.api.forget(symbol)
+            except Exception as e:
+                self.logger.error(f"Error unsubscribing from {symbol}: {e}")
         self.subscriptions.clear()
 
     async def initialize_data_manager(self):

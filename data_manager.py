@@ -44,8 +44,8 @@ class DataManager:
         self.data = data if data is not None else {}
         self.subscriptions = {}
         self.last_data = {}
-        self._symbol_groups = None  # Initialize appropriately
-        self._frame = pd.DataFrame()  # Initialize your main dataframe
+        self._symbol_groups = None
+        self._frame = pd.DataFrame()
 
     @property
     def frame(self):
@@ -155,7 +155,7 @@ class DataManager:
             try:
                 await self.api.forget(sub.id)
             except Exception as e:
-                logger.error(f"Error unsubscribing {symbol}: {str(e)}")
+                self.logger.error(f"Error unsubscribing {symbol}: {str(e)}")
         self.subscriptions.clear()
 
     def get_close_prices(self, symbol: str) -> List[float]:
