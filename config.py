@@ -4,6 +4,7 @@ from configparser import ConfigParser
 
 class Config:
     def __init__(self, config_file="config/config.ini"):
+        print("Config class initialized")  # Add this line
         # Load configuration from the ini file
         self.config = ConfigParser()
         self.config.read(config_file)
@@ -30,7 +31,8 @@ class Config:
 
         # STANDARD settings
         symbols_str = self.config["Settings"].get("SYMBOLS")
-        self.SYMBOLS = [s.strip() for s in symbols_str.split(",")]
+        self.SYMBOLS = [s.strip() for s in symbols_str.split(",")] if symbols_str else []
+
         self.TIMEFRAME = self.config["Settings"].get("TIMEFRAME")
         self.RISK_PERCENTAGE = self.config["Settings"].getfloat(
             "RISK_PERCENTAGE", fallback=0.01

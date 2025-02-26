@@ -3,14 +3,17 @@ from datetime import datetime
 import asyncio
 from config import Config
 from deriv_api import DerivAPI
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Optional
 from pandas.core.groupby import DataFrameGroupBy
 from pandas.core.window import RollingGroupby
 
 
+from rx import Observable
+
+
 class DataManager:
     def __init__(
-        self, config: Config, api, logger, data=None, max_data_points: int = 100000
+        self, config: Config, api, logger, max_data_points: int = 100000
     ) -> None:
         """Initializes the Stock Data Manager with real-time data from Deriv API.
 
@@ -18,7 +21,6 @@ class DataManager:
             config: Configuration object with settings like symbols.
             api: Connection object for the Deriv API.
             logger: Logger object for logging.
-            data: Optional initial data (defaults to None).
             max_data_points: Max number of data points to store for each symbol.
         """
         self.config = config
@@ -27,30 +29,40 @@ class DataManager:
         self.max_data_points = max_data_points
         self.data_frames = {
             symbol: pd.DataFrame(
-                columns=[
-                    "symbol",
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "bid",
-                    "ask",
-                    "quote",
-                ]
+                columns=["epoch", "bid", "ask", "quote", "id", "pip_size"]
             )
             for symbol in self.symbols
         }
         self.logger = logger
-        self.data = data if data is not None else {}
-        self.subscriptions = {}
+        self.subscriptions = {}  # Store RxPy subscriptions
         self.last_data = {}
-        self._symbol_groups = None
         self._frame = pd.DataFrame()
 
     @property
     def frame(self):
         return self._frame
+
+    async def subscribe_to_ticks(self, symbol: str) -> None:
+        """Subscribe to tick stream for a given symbol."""
+        if not isinstance(symbol, str) or not symbol:
+            self.logger.error(f"Invalid symbol: {symbol}")
+            return
+
+        if symbol in self.subscriptions:  # Check if already subscribed
+            self.logger.info(f"Already subscribed to {symbol}. Ingesting last data.")
+            # Ingest the last data for the symbol
+            await self.update(symbol, self.last_data.get(symbol, {}))
+            return
+
+        try:
+            # Subscribe to the tick stream
+            tick_stream = await self.api.subscribe({"ticks": symbol, "subscribe": 1})
+            callback = self.create_subs_cb(symbol)
+            subscription = tick_stream.subscribe(callback)  # Store the RxPy subscription
+            self.subscriptions[symbol] = subscription  # Store the subscription object
+            self.logger.info(f"Subscribed to {symbol} tick stream.")
+        except Exception as e:
+            self.logger.error(f"Error subscribing to {symbol}: {e}")
 
     def create_subs_cb(self, symbol: str):
         """Generates a callback function for real-time data updates.
@@ -59,49 +71,19 @@ class DataManager:
             symbol: The symbol to track.
 
         Returns:
-            Callbackfunction to handle real-time tick data.
+            Callback function to handle real-time tick data.
         """
-        count = 0
+        def cb(data: Any):
+            self.logger.debug(f"Received data for symbol {symbol}: {data}")
+            self.last_data[symbol] = data  # Store the last received data
+            
+            try:
+                asyncio.get_event_loop().create_task(self.update(symbol, data))
+            except Exception as e:
+                self.logger.error(f"Error creating task for symbol {symbol}: {e}")
 
-        def cb(data):
-            nonlocal count
-            count += 1
-            self.last_data[symbol] = data
-            self.logger.debug(
-                f"Received data for symbol {symbol}: {data} (Count: {count})"
-            )
-            asyncio.get_event_loop().create_task(self.update(symbol, data))
 
         return cb
-
-    async def subscribe_to_ticks(self, symbol):
-        """Subscribe to tick stream for a given symbol."""
-        try:
-            if not isinstance(symbol, str) or not symbol:
-                self.logger.error(f"Invalid symbol: {symbol}")
-                return
-
-            tick_stream = await self.api.subscribe({"ticks": symbol, "subscribe": 1})
-            self.subscriptions[symbol] = tick_stream
-            tick_stream.subscribe(self.create_subs_cb(symbol))
-            self.logger.info(f"Subscribed to {symbol} tick stream.")
-        except Exception as e:
-            self.logger.error(f"Error subscribing to {symbol}: {e}")
-
-    async def start_subscriptions(self) -> None:
-        """Starts WebSocket subscriptions for all symbols."""
-        if not self.symbols:
-            self.logger.warning("No symbols to subscribe to.")
-            return
-
-        tasks = [self.subscribe_to_ticks(symbol) for symbol in self.symbols]
-
-        try:
-            await asyncio.gather(*tasks)
-            self.logger.info("All subscriptions started successfully.")
-        except Exception as e:
-            self.logger.error(f"Error during subscription: {e}")
-
     async def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
         """Updates the DataFrame for the specified symbol with new tick data.
 
@@ -116,10 +98,13 @@ class DataManager:
                 )
                 return
 
-            epoch = tick["tick"].get("epoch")
-            ask = tick["tick"].get("ask")
-            bid = tick["tick"].get("bid")
-            quote = tick["tick"].get("quote")
+            tick_data = tick["tick"]
+            epoch = tick_data.get("epoch")
+            bid = tick_data.get("bid")
+            ask = tick_data.get("ask")
+            quote = tick_data.get("quote")
+            tick_id = tick_data.get("id")
+            pip_size = tick_data.get("pip_size")
 
             if None in (epoch, ask, bid, quote):
                 self.logger.error(f"Incomplete tick data for symbol {symbol}: {tick}")
@@ -127,37 +112,56 @@ class DataManager:
 
             new_data = pd.DataFrame(
                 {
-                    "symbol": [symbol],
-                    "timestamp": [epoch],
-                    "open": [bid],
-                    "high": [ask],
-                    "low": [bid],
-                    "close": [bid],
+                    "epoch": [epoch],
                     "bid": [bid],
                     "ask": [ask],
                     "quote": [quote],
+                    "id": [tick_id],
+                    "pip_size": [pip_size],
                 }
             )
 
-            if symbol in self.data_frames:
-                self.data_frames[symbol] = pd.concat(
-                    [self.data_frames[symbol], new_data]
-                ).tail(self.max_data_points)
-            else:
-                self.logger.warning(f"Symbol {symbol} not found in managed symbols.")
+            if new_data.empty:
+                self.logger.warning(f"No valid data to concatenate for {symbol}")
+                return
+
+            # Concatenate new data with existing data
+            self.data_frames[symbol] = pd.concat(
+                [self.data_frames.get(symbol).dropna(), new_data]
+            ).tail(self.max_data_points)  # Keep only the last max_data_points
+
         except KeyError as e:
             self.logger.error(f"KeyError: Missing expected key in tick data - {e}")
         except Exception as e:
             self.logger.error(f"Error updating symbol {symbol}: {e}")
 
-    async def stop_subscriptions(self):
-        """Proper subscription cleanup"""
+
+    async def start_subscriptions(self) -> None:
+        """Starts WebSocket subscriptions for all symbols."""
+        if not self.symbols:
+            self.logger.warning("No symbols to subscribe to.")
+            return
+    
+        tasks = []
+        for symbol in self.symbols:
+            tasks.append(self.subscribe_to_ticks(symbol))
+    
+        try:
+            await asyncio.gather(*tasks)
+            self.logger.info("All subscriptions started successfully.")
+        except Exception as e:
+            self.logger.error(f"Error during subscription: {e}")
+
+    async def stop_subscriptions(self) -> None:
+        """Properly dispose of all subscription channels."""
         for symbol, sub in self.subscriptions.items():
             try:
-                await self.api.forget(sub.id)
+                sub.dispose()  # Call dispose on the subscription object
+                self.logger.info(f"Unsubscribed from {symbol}")
             except Exception as e:
-                self.logger.error(f"Error unsubscribing {symbol}: {str(e)}")
+                self.logger.error(f"Error unsubscribing from {symbol}: {e}")
         self.subscriptions.clear()
+        await self.api.clear()  # Clear API state if supported
 
     def get_close_prices(self, symbol: str) -> List[float]:
         """Retrieves the close prices for the specified symbol.
@@ -169,10 +173,10 @@ class DataManager:
             A list of close prices.
         """
         df = self.data_frames.get(symbol)
-        if df is not None:
-            return df["close"].tolist()
-        else:
-            raise ValueError(f"Symbol '{symbol}' not found.")
+        if df is None or "close" not in df.columns:
+            self.logger.debug(f"No close prices available for {symbol}")
+            return []
+        return df["close"].tolist()
 
     async def grab_historical_data(
         self,
@@ -180,85 +184,103 @@ class DataManager:
         end_timestamp: int,
         symbol: str,
         bar_type: str = "minute",
-    ) -> Union[Dict, List]:
+    ) -> pd.DataFrame:
         """Fetches historical data for a single symbol.
 
         Args:
-            start_timestamp (int): Start time in seconds or datetime object
-            end_timestamp (int): End time in seconds or datetime object
-            symbol (str): Trading symbol to fetch data for
-            bar_type (str): Type of bars to fetch ('minute' or other)
+            start_timestamp: Start time in seconds or datetime object.
+            end_timestamp: End time in seconds or datetime object.
+            symbol: Trading symbol to fetch data for.
+            bar_type: Type of bars ('minute', '5minute', 'hour', etc.).
 
         Returns:
-            Tuple containing dictionary of raw candle data and list of processed prices
-
-        Raises:
-            ValueError: If no historical data is available
-            Exception: For other API or processing errors
+            DataFrame with historical OHLC data.
         """
-        # Convert to seconds if datetime objects are passed
         if isinstance(start_timestamp, datetime):
             start_timestamp = int(start_timestamp.timestamp())
         if isinstance(end_timestamp, datetime):
             end_timestamp = int(end_timestamp.timestamp())
 
-        # Prepare the arguments for the ticks_history API call
+        granularity_map = {"minute": 60, "5minute": 300, "hour": 3600}
+        if bar_type not in granularity_map:
+            raise ValueError(
+                f"Unsupported bar_type: {bar_type}. Supported: {list(granularity_map.keys())}"
+            )
+
         args = {
             "ticks_history": symbol,
             "start": start_timestamp,
             "end": end_timestamp,
-            "granularity": (
-                60 if bar_type == "minute" else 300
-            ),  # Set granularity based on bar type
-            "count": 5000,  # Limit the number of ticks
-            "adjust_start_time": 1,  # Adjust start time if necessary
+            "granularity": granularity_map[bar_type],
+            "count": 5000,
+            "adjust_start_time": 1,
         }
-
-        self.logger.debug(f"Requesting ticks_history with args: {args}")
 
         try:
             response = await self.api.ticks_history(args)
-            self.logger.debug(f"Response for {symbol}: {response}")
-
             if "error" in response:
-                self.logger.error(f"API error for {symbol}: {response['error']}")
                 raise Exception(f"API error: {response['error']['message']}")
-
             if "candles" not in response or not response["candles"]:
-                self.logger.warning(
-                    f"No candles data for {symbol} in response: {response}"
-                )
-                raise ValueError(f"No historical data available for {symbol}.")
+                self.logger.warning(f"No historical data available for {symbol}.")
+                return (
+                    pd.DataFrame()
+                )  # Return an empty DataFrame instead of raising an error
 
-            # Process the response to extract relevant data
-            symbol_data = {"candles": response["candles"]}
-            symbol_prices = [
-                {
-                    "symbol": symbol,
-                    "timestamp": candle["epoch"],
-                    "open": float(candle["open"]),
-                    "close": float(candle["close"]),
-                    "high": float(candle["high"]),
-                    "low": float(candle["low"]),
-                    "quote": float(
-                        candle["close"]
-                    ),  # Using close as quote for consistency
-                }
-                for candle in response["candles"]
-            ]
+            historical_df = pd.DataFrame(
+                [
+                    {
+                        "timestamp": candle["epoch"],
+                        "open": float(candle["open"]),
+                        "high": float(candle["high"]),
+                        "low": float(candle["low"]),
+                        "close": float(candle["close"]),
+                    }
+                    for candle in response["candles"]
+                ]
+            )
 
-            # Update the data_frames with historical data
             if symbol in self.data_frames:
-                historical_df = pd.DataFrame(symbol_prices)
                 self.data_frames[symbol] = pd.concat(
                     [self.data_frames[symbol], historical_df]
                 ).tail(self.max_data_points)
-
-            return symbol_data, symbol_prices
+            return historical_df
 
         except Exception as e:
-            self.logger.error(f"Error fetching data for {symbol}: {str(e)}")
-            raise
+            self.logger.error(f"Error fetching historical data for {symbol}: {e}")
+            return pd.DataFrame()  # Return an empty DataFrame on error
+
+    def add_rows(self, data: List[Dict]) -> None:
+        """Adds new rows to the data_frames.
+
+        Args:
+            data: List of dictionaries with 'symbol', 'timestamp', 'bid', 'ask', 'quote'.
+        """
+        for row in data:
+            symbol = row["symbol"]
+            if symbol not in self.data_frames:
+                self.logger.warning(f"Symbol {symbol} not in managed symbols.")
+                continue
+
+            new_data = pd.DataFrame(
+                [
+                    {
+                        "epoch": row["epoch"],
+                        "bid": row.get("bid"),
+                        "ask": row.get("ask"),
+                        "quote": row.get("quote"),
+                        "id": row.get("id"),
+                        "pip_size": row.get("pip_size"),
+                    }
+                ]
+            )
+
+            if new_data.empty:
+                self.logger.warning(f"No valid data to add for {symbol}")
+                continue
+
+            self.data_frames[symbol] = pd.concat(
+                [self.data_frames[symbol], new_data]
+            ).tail(self.max_data_points)
 
     def get_ohlc_data(self, symbol: str) -> pd.DataFrame:
         """Retrieves the OHLC data for the specified symbol.
@@ -269,23 +291,21 @@ class DataManager:
         Returns:
             A DataFrame containing OHLC data for the symbol.
         """
-        df = self.data_frames.get(symbol)
-        if df is not None:
-            return df
-        else:
-            raise ValueError(f"Symbol '{symbol}' not found.")
+        if symbol in self.data_frames:
+            return self.data_frames[symbol]
+        raise ValueError(f"Symbol '{symbol}' not found.")
 
     @property
-    def symbol_groups(self) -> DataFrameGroupBy:
+    def _symbol_groups(self) -> DataFrameGroupBy:
         """Returns a GroupBy object of symbols in the data frames.
 
         Returns:
             A pandas GroupBy object grouped by symbol.
         """
-        if not self.data:
+        if not self.data_frames:
             return pd.DataFrame().groupby([])
 
-        return pd.concat(self.data.values()).groupby("symbol", as_index=False)
+        return pd.concat(self.data_frames.values()).groupby("symbol", as_index=False)
 
     async def symbol_rolling_groups(self, size: int) -> RollingGroupby:
         """Grabs rolling windows of data for each symbol.
@@ -298,27 +318,6 @@ class DataManager:
         """
         df = pd.concat(self.data_frames.values())
         return df.groupby("symbol").rolling(size)
-
-    def add_rows(self, data: Dict) -> None:
-        """Adds new rows to the stock data.
-
-        Args:
-            data: A dictionary of quotes containing 'symbol', 'datetime', 'open', 'close', 'high', 'low', 'volume'.
-        """
-        column_names = ["open", "close", "high", "low", "volume"]
-
-        for quote in data:
-            time_stamp = pd.to_datetime(quote["datetime"], unit="ms", origin="unix")
-            row_id = (quote["symbol"], time_stamp)
-            row_values = [
-                quote["open"],
-                quote["close"],
-                quote["high"],
-                quote["low"],
-                quote["volume"],
-            ]
-            new_row = pd.Series(data=row_values, index=column_names)
-            self.data_frames[quote["symbol"]].loc[row_id] = new_row
 
     def do_indicator_exist(self, column_names: List[str]) -> bool:
         """Checks if the specified indicator columns exist in the data frames.
@@ -340,32 +339,39 @@ class DataManager:
         indicators: Dict,
         indicators_comp_key: List[str],
         indicators_key: List[str],
-    ) -> Union[pd.DataFrame, None]:
-        """Checks for buy/sell signals based on indicator conditions.
+        window_size: int = 1,
+    ) -> Optional[pd.DataFrame]:
+        """Checks for buy/sell signals based on indicator conditions over a window.
 
         Args:
-            indicators: A dictionary containing indicator configurations.
-            indicators_comp_key: A list of comparative indicator keys.
-            indicators_key: A list of regular indicator keys.
+            indicators: Dictionary of indicator configurations.
+            indicators_comp_key: List of comparative indicator keys.
+            indicators_key: List of regular indicator keys.
+            window_size: Number of rows to consider for signals.
 
         Returns:
-            A DataFrame containing buy/sell conditions, or None if no signals.
+            DataFrame with buy/sell conditions or None if no signals.
         """
-        last_rows = pd.concat(self.data_frames.values()).tail(1)
+        all_data = pd.concat(self.data_frames.values())
+        if all_data.empty:
+            return None
 
+        last_window = all_data.tail(window_size)
         conditions = {}
-        if self.do_indicator_exist(indicators_key):
-            for indicator in indicators_key:
-                buy_condition = indicators[indicator]["buy"]
-                sell_condition = indicators[indicator]["sell"]
-                buy_operator = indicators[indicator]["buy_operator"]
-                sell_operator = indicators[indicator]["sell_operator"]
 
-                buy_condition_met = buy_operator(last_rows[indicator], buy_condition)
-                sell_condition_met = sell_operator(last_rows[indicator], sell_condition)
+        for indicator in indicators_key:
+            if indicator not in last_window.columns:
+                continue
+            buy_condition = indicators[indicator]["buy"]
+            sell_condition = indicators[indicator]["sell"]
+            buy_operator = indicators[indicator]["buy_operator"]
+            sell_operator = indicators[indicator]["sell_operator"]
 
-                conditions["buys"] = buy_condition_met.where(lambda x: x).dropna()
-                conditions["sells"] = sell_condition_met.where(lambda x: x).dropna()
+            buy_met = buy_operator(last_window[indicator], buy_condition)
+            sell_met = sell_operator(last_window[indicator], sell_condition)
+
+            conditions["buys"] = buy_met.where(lambda x: x).dropna()
+            conditions["sells"] = sell_met.where(lambda x: x).dropna()
 
         return pd.DataFrame(conditions) if conditions else None
 
@@ -373,16 +379,8 @@ class DataManager:
         """Resets all internal data structures, clearing all stored information."""
         self.data_frames = {
             symbol: pd.DataFrame(
-                columns=[
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "bid",
-                    "ask",
-                    "quote",
-                ]
+                columns=["epoch", "bid", "ask", "quote", "id", "pip_size"]
             )
             for symbol in self.symbols
         }
+        self.last_data.clear()

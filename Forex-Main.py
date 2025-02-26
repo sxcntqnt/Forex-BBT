@@ -1,73 +1,70 @@
+"""Main module for Forex trading bot."""
+import pdb
 import asyncio
 import logging
-import sys
 import os
-import tracemalloc
+import sys
 import time
-
-from contextlib import closing
+import tracemalloc
 from datetime import datetime, timezone
-from typing import Dict, List, Union, Tuple
 from functools import partial
+from typing import Dict, List, Tuple, Union
 
-from config import Config
+from deriv_api import DerivAPI  # Third-party import first
+from config import Config  # Then first-party imports
 from data_manager import DataManager
-from deriv_api import DerivAPI
-from bot import ForexBot
-from utils import TimestampUtils
 from strategy import StrategyManager
+from bot import ForexBot
+from utils import TimestampUtils, PerformanceMonitor
 from web_interface import start_web_interface
 
-# Configure logging with process ID
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - PID:%(process)d - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("bot_debug.log", mode="w"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger("Main")
-logger.debug("Logging initialized in PID %d", os.getpid())
+logger = logging.getLogger(__name__)
 
+import nest_asyncio
+
+nest_asyncio.apply()  # This needs to be called only once
 
 async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivAPI]:
     """Main function to start the bot with multiple tasks and return historical data."""
     logger.info("Starting main() in process %d", os.getpid())
     tracemalloc.start()
-    config = Config()
-    bot = None
-    api = None
-    tasks = []
-    historical_data = None
+    local_config = Config()
+    local_bot = None
+    local_api = None
+    historical_data_result = {}
 
     try:
-        logger.info("Initialized config with symbols: %s", config.SYMBOLS)
+        logger.info(f"Type of local_config.SYMBOLS: {type(local_config.SYMBOLS)}")
+        logger.info(f"Value of local_config.SYMBOLS: {local_config.SYMBOLS}")
+
+        logger.info("Initialized config with symbols: %s", local_config.SYMBOLS)
 
         logger.debug("Initializing DerivAPI...")
-        api = DerivAPI(app_id=config.APP_ID)
-        response = await api.ping({"ping": 1})
+        local_api = DerivAPI(app_id=local_config.APP_ID)
+        response = await local_api.ping({"ping": 1})
         logger.debug("Ping response: %s", response)
         if response.get("ping") != "pong":
             raise ConnectionError("API ping failed")
 
-        data_manager = DataManager(config=config, api=api, logger=logger)
-        strategy_manager = StrategyManager(
-            data_manager=data_manager, api=api, logger=logger
+        local_data_manager = DataManager(
+            config=local_config, api=local_api, logger=logger
+        )
+        local_strategy_manager = StrategyManager(
+            data_manager=local_data_manager, api=local_api, logger=logger
         )
 
-        bot = ForexBot(
-            config=config,
-            data_manager=data_manager,
-            strategy_manager=strategy_manager,
+        local_bot = ForexBot(
+            config=local_config,
+            data_manager=local_data_manager,
+            strategy_manager=local_strategy_manager,
             logger=logger,
-            api=api,
+            api=local_api,
         )
 
-        # Authorization
         try:
             auth_response = await asyncio.wait_for(
-                api.authorize({"authorize": config.DERIV_API_TOKEN}), timeout=15
+                local_api.authorize({"authorize": local_config.DERIV_API_TOKEN}),
+                timeout=15,
             )
             if not auth_response.get("authorize", {}).get("loginid"):
                 raise ConnectionError("Authorization failed")
@@ -75,94 +72,101 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
         except asyncio.TimeoutError:
             logger.error("Authorization timed out")
             raise
-        except Exception as e:
-            logger.error("Authorization failed: %s", str(e))
+        except Exception as auth_error:
+            logger.error("Authorization failed: %s", str(auth_error))
             raise
 
-        # Fetching historical data
         timestamp_utils = TimestampUtils()
-        start_ts = (
-            timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) - 172800
-        )  # 1 day ago
-        end_ts = ( 
-            timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) -86400
-        
+        start_date = datetime.fromisoformat(local_config.BACKTEST_START_DATE).replace(
+            tzinfo=timezone.utc
+        )
+        end_date = datetime.fromisoformat(local_config.BACKTEST_END_DATE).replace(
+            tzinfo=timezone.utc
         )
 
-        logger.info("Fetching historical prices for frxEURUSD...")
-        try:
-            # Fetch historical data for all symbols in config.SYMBOLS
-            for symbol in config.SYMBOLS:
-                raw_data, prices = await asyncio.wait_for(
-                    data_manager.grab_historical_data(start_ts, end_ts, symbol),
+        start_ts = timestamp_utils.to_seconds(start_date)
+        end_ts = timestamp_utils.to_seconds(end_date)
+
+        logger.info("Fetching historical prices from %s to %s...", start_date, end_date)
+
+        logger.info(f"local_config.SYMBOLS before loop: {local_config.SYMBOLS}") #added
+        for local_symbol in local_config.SYMBOLS:
+            logger.info("Fetching historical data for %s...", local_symbol)
+            if not local_symbol: # Add this check
+                logger.error("local_symbol is empty! Skipping.")
+                continue  # Skip to the next iteration
+            try:
+                raw_data = await asyncio.wait_for(
+                    local_data_manager.grab_historical_data(
+                        start_ts, end_ts, local_symbol
+                    ),
                     timeout=60,
                 )
-                historical_data[symbol] = raw_data  # Store raw data per symbol
-                logger.debug("Raw historical data for %s: %s", symbol, raw_data)
+                if not raw_data.empty:
+                    historical_data_result[local_symbol] = raw_data
+                    logger.debug(
+                        "Raw historical data for %s: %s", local_symbol, raw_data
+                    )
+                    first_candle = raw_data.iloc[0]
 
-                if raw_data["candles"]:
-                    first_candle = raw_data["candles"][0]
-                    first_candle["datetime"] = datetime.fromtimestamp(
-                        first_candle["epoch"]
-                    ).isoformat()
+                    logger.debug(f"Type of first_candle: {type(first_candle)}")
+                    logger.debug(f"Value of first_candle: {first_candle}")
+
+                    pdb.set_trace()  # <---- ADD THIS LINE: Set a breakpoint HERE
+                    first_candle_datetime = datetime.fromtimestamp(first_candle["timestamp"]).isoformat()
+                    raw_data.at[raw_data.index[0], "datetime"] = first_candle_datetime # Add the date time into the raw_data
                     logger.info(
                         "First candle datetime for %s: %s",
-                        symbol,
-                        first_candle["datetime"],
+                        local_symbol,
+                        first_candle_datetime,
                     )
                 else:
-                    logger.info("No historical data for %s", symbol)
+                    historical_data_result[local_symbol] = {"candles": []}
+                    logger.info("No historical data for %s", local_symbol)
 
-        except asyncio.TimeoutError:
-            logger.error("Historical data fetch timed out after 60 seconds")
-            historical_data = None
-        except Exception as e:
-            logger.error(
-                "Error fetching historical data: %s, type: %s",
-                str(e),
-                type(e).__name__,
-                exc_info=True,
-            )
-            historical_data[symbol] = {"candles": []}
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Historical data fetch for %s timed out after 60 seconds",
+                    local_symbol,
+                    f"Type of local_symbol: {type(local_symbol)}" # Added type info
+                )
+                historical_data_result[local_symbol] = {"candles": []}
+            except Exception as data_error:
+                logger.error(
+                    "Error fetching historical data for %s: %s",
+                    local_symbol,
+                    str(data_error),
+                )
+                historical_data_result[local_symbol] = {"candles": []}
+        logger.info(f"local_config.SYMBOLS after loop: {local_config.SYMBOLS}") #added
 
-        # Starting ForexBot with multiple background tasks
         logger.info("Starting ForexBot with multiple background tasks...")
         tasks = [
-            asyncio.create_task(bot.run(), name="bot_run"),
+            asyncio.create_task(local_bot.run(), name="bot_run"),
             asyncio.create_task(
-                bot.data_manager.start_subscriptions(), name="data_subs"
+                local_bot.data_manager.start_subscriptions(), name="data_subs"
             ),
             asyncio.create_task(
-                bot.initialize_data_manager(data_manager), name="data_init"
+                local_bot.initialize_data_manager(local_data_manager), name="data_init"
             ),
-            asyncio.create_task(start_web_interface(bot), name="web_interface"),
-            asyncio.create_task(run_blocking_tasks(bot, config), name="blocking_tasks"),
-            asyncio.create_task(event_loop_watchdog(config), name="watchdog"),
+            asyncio.create_task(start_web_interface(local_bot), name="web_interface"),
+            asyncio.create_task(
+                run_blocking_tasks(local_bot, local_config), name="blocking_tasks"
+            ),
         ]
-        await asyncio.sleep(2)  # Allow tasks to start
 
-        logger.info("All tasks scheduled")
-        return historical_data, bot, api  # Return the expected values
-
-    except Exception as e:
-        logger.critical("Critical error in main: %s", str(e), exc_info=True)
-        for task in tasks:
-            task.cancel()  # Cancel all tasks
-            try:
-                await task  # Await cancellation
-            except asyncio.CancelledError:
-                logger.debug("Task %s cancelled during error cleanup", task.get_name())
-        if bot:
-            await bot.stop()  # Ensure the bot is stopped
-        if api:
-            await api.clear()  # Clear the API
-        raise  # Re-raise the exception for further handling
-
+        await asyncio.gather(*tasks)
+        pdb.set_trace()
+    except Exception as main_error:
+        logger.error("An error occurred in main: %s", str(main_error))
     finally:
-        tracemalloc.stop()
+        if local_api:
+            await local_api.disconnect()
+        logger.info("Main function completed")
+        return historical_data_result, local_bot, local_api
 
 
-async def event_loop_watchdog(config: Config):
+async def event_loop_watchdog(config: Config) -> None:
     """Monitors event loop health indefinitely."""
     logger.info("Watchdog started in process %d", os.getpid())
     while True:
@@ -177,80 +181,90 @@ async def event_loop_watchdog(config: Config):
         logger.debug("Active tasks: %d", len(current_tasks))
 
 
-async def run_blocking_tasks(bot: ForexBot, config: Config):
+async def run_blocking_tasks(local_bot: ForexBot, local_config: Config) -> None:
     """Run CPU-intensive tasks in executor indefinitely."""
     logger.info("Blocking tasks started in process %d", os.getpid())
-    loop = asyncio.get_event_loop()
+    event_loop = asyncio.get_event_loop()
     while True:
         try:
-            await loop.run_in_executor(
-                None, partial(process_blocking_operations, bot, config)
+            await event_loop.run_in_executor(
+                None, partial(process_blocking_operations, local_bot, local_config)
             )
             await asyncio.sleep(1)
-        except Exception as e:
-            logger.error("Blocking task error: %s", str(e))
+        except ValueError as blocking_error:
+            logger.error("Blocking task error: %s", str(blocking_error))
             await asyncio.sleep(5)
 
 
-def process_blocking_operations(bot: ForexBot, config: Config):
+def process_blocking_operations(local_bot: ForexBot, local_config: Config) -> None:
     """Process blocking operations."""
     symbols = (
-        config.SYMBOLS.split(",") if isinstance(config.SYMBOLS, str) else config.SYMBOLS
+        local_config.SYMBOLS.split(",")
+        if isinstance(local_config.SYMBOLS, str)
+        else local_config.SYMBOLS
     )
     if symbols:
-        bot.create_tick_callback(symbols[0].strip())
+        symbol_to_use = symbols[0].strip()
+        logger.info(f"Creating tick callback for symbol: {symbol_to_use}")
+        local_bot.create_tick_callback(symbol_to_use)
 
 
-async def stop_bot(bot: ForexBot, api: DerivAPI):
+async def stop_bot(local_bot: ForexBot, local_api: DerivAPI) -> None:
+    """Stop the bot and clean up resources."""
     logger.info("Stopping bot")
-    await bot.stop()
-    await api.clear()
+    await local_bot.stop()
+    await local_api.clear()
     logger.info("Bot stopped")
 
 
 if __name__ == "__main__":
     logger.info("Main process started with PID %d", os.getpid())
     try:
-
-        async def run_with_cleanup():
+        async def run_with_cleanup() -> Tuple:
             try:
-                result = await main()  # Call the main function
-                logger.debug(f"Main returned: {result}")  # Log the result for debugging
-                return result
-            except Exception as e:
-                logger.error(f"Error in main function: {str(e)}")
-                return None  # Return None or a default value in case of an error
+                main_result = await main()
+                logger.debug("Main returned: %s", main_result)
+                return main_result
+            except Exception as cleanup_error:
+                logger.error("Error in main function: %s", str(cleanup_error))
+                return None, None, None
 
-        # Unpack the result safely
-        result = asyncio.run(run_with_cleanup(), debug=True)
+        # Use asyncio.run to execute the run_with_cleanup coroutine
+        main_result = asyncio.run(run_with_cleanup(), debug=True)
 
-        # Check if result is valid before unpacking
-        if result is None or len(result) != 3:
+        if main_result is None or len(main_result) != 3:
             logger.critical(
                 "Unexpected result from main function. Expected 3 values, got: %s",
-                result,
+                main_result,
             )
             sys.exit(1)
 
-        historical_data, bot, api = result  # Unpack the result safely
+        historical_data_main, forex_bot, deriv_api = main_result
 
         logger.info("Main completed")
-        if historical_data and any(historical_data.values()):
-            for symbol, data in historical_data.items():
+        if historical_data_main and any(historical_data_main.values()):
+            for symbol_key, data in historical_data_main.items():
                 if data and "candles" in data and data["candles"]:
-                    logger.info("First candle for %s: %s", symbol, data["candles"][0])
+                    logger.info(
+                        "First candle for %s: %s", symbol_key, data["candles"][0]
+                    )
         else:
             logger.warning("No historical data returned from main()")
 
         logger.info("Bot running in background. Press Ctrl+C to stop.")
-        loop = asyncio.get_event_loop()
-        try:
-            loop.run_forever()
-        except KeyboardInterrupt:
-            logger.info("Received interrupt, stopping...")
-            asyncio.run(stop_bot(bot, api))  # Fixed syntax: pass as separate args
-            loop.close()
 
-    except Exception as e:
-        logger.critical("Application bootstrap failed: %s", str(e))
+        # Define an async function to handle the main loop
+        async def main_loop():
+            try:
+                while True:
+                    await asyncio.sleep(1)  # Keep the program running
+            except KeyboardInterrupt:
+                logger.info("Received interrupt, stopping...")
+                await stop_bot(forex_bot, deriv_api)
+
+        # Run the main loop
+        asyncio.run(main_loop())
+
+    except Exception as bootstrap_error:
+        logger.critical("Application bootstrap failed: %s", str(bootstrap_error))
         sys.exit(1)

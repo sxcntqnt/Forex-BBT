@@ -41,16 +41,16 @@ class StrategyManager:
         self._indicator_signals = {}
 
         # Initialize the main DataFrame
-        if not data_manager.data:  # Check if data is empty
+        if not data_manager.data_frames:  # Check if data is empty
             self.logger.warning("No DataFrames available to concatenate.")
             self._frame = pd.DataFrame()  # Initialize with an empty DataFrame
         else:
             self._frame = pd.concat(
-                data_manager.data.values(), ignore_index=True
+                data_manager.data_frames.values(), ignore_index=True
             )  # Concatenate DataFrames
 
         # Initialize strategies
-        self.strategies = [RSIStrategy(), MACDStrategy(), MLStrategy(self.config)]
+        self.strategies = [RSIStrategy(self.config), MACDStrategy(self.config), MLStrategy(self.config)]
 
     async def should_enter_trade(self, symbol: str) -> bool:
         """Determines if a trade should be entered based on strategies."""
