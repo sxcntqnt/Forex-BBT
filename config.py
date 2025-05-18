@@ -1,5 +1,7 @@
 import os, time, sys
 from configparser import ConfigParser
+from typing import Any
+#Dict, List, Tuple, Optional
 
 
 class Config:
@@ -61,3 +63,20 @@ class Config:
         self.ML_WINDOW_SIZE = self.config["ML"].getint("ML_WINDOW_SIZE", fallback=20)
         self.ML_THRESHOLD = self.config["ML"].getfloat("ML_THRESHOLD", fallback=0.001)
         self.SEED = self.config["ML"].getint("SEED", fallback=42)
+
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Retrieve a configuration value by key with an optional default."""
+        return getattr(self, key, default)
+
+    def validate(self) -> None:
+        """Validate required configuration attributes."""
+        required = [
+            'APP_ID', 'DERIV_API_TOKEN', 'SYMBOLS', 'MAX_DATA_POINTS',
+            'RSI_PERIOD', 'RSI_OVERBOUGHT', 'RSI_OVERSOLD',
+            'MACD_FAST_PERIOD', 'MACD_SLOW_PERIOD', 'MACD_SIGNAL_PERIOD'
+        ]
+        for attr in required:
+            if not hasattr(self, attr) or getattr(self, attr) is None:
+                logger.error(f"Missing required config atributo: {attr}")
+                raise ValueError(f"Missing required config atributo: {attr}")

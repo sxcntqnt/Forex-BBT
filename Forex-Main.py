@@ -4,12 +4,12 @@ import sys
 import os
 import tracemalloc
 import time
-
-from contextlib import closing
-from datetime import datetime, timezone
-from typing import Dict, List, Union, Tuple
-from functools import partial
-
+import traceback
+import tenacity
+from pandas import DataFrame as df
+import pandas as pd
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Union, Tuple, Optional
 from config import Config
 from data_manager import DataManager
 from deriv_api import DerivAPI
@@ -28,34 +28,127 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("Main")
-logger.debug("Logging initialized in PID %d", os.getpid())
 
-
-async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivAPI]:
+async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivAPI]]:
     """Main function to start the bot with multiple tasks and return historical data."""
     logger.info("Starting main() in process %d", os.getpid())
     tracemalloc.start()
-    config = Config()
+    config = None
     bot = None
     api = None
     tasks = []
-    historical_data = None
+    historical_data = {}
 
     try:
-        logger.info("Initialized config with symbols: %s", config.SYMBOLS)
+        # Initialize Config
+        logger.debug("Initializing Config...")
+        config = Config()
+        if not config.SYMBOLS:
+            raise ValueError("No symbols defined in config.SYMBOLS")
 
-        logger.debug("Initializing DerivAPI...")
+        # Validate symbols
+        invalid_symbols = [s for s in config.SYMBOLS if not s.startswith('frx')]
+        if invalid_symbols:
+            raise ValueError(f"Invalid symbols in config.SYMBOLS: {invalid_symbols}")
+
+        historical_data = {symbol: {"candles": []} for symbol in config.SYMBOLS}
+        logger.info("Initialized config with symbols: %s, APP_ID: %s", config.SYMBOLS, config.APP_ID)
+
+        # Initialize DerivAPI
+        logger.debug("Initializing DerivAPI with APP_ID: %s", config.APP_ID)
         api = DerivAPI(app_id=config.APP_ID)
-        response = await api.ping({"ping": 1})
-        logger.debug("Ping response: %s", response)
-        if response.get("ping") != "pong":
-            raise ConnectionError("API ping failed")
 
+        # Retry ping with exponential backoff
+        @tenacity.retry(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+            retry=tenacity.retry_if_exception_type((TimeoutError, ConnectionError)),
+            before_sleep=lambda retry_state: logger.error(
+                f"Retrying API ping: attempt {retry_state.attempt_number}, error: {retry_state.outcome.exception()}"
+            )
+        )
+        async def ping_api():
+            response = await asyncio.wait_for(api.ping({"ping": 1}), timeout=15)
+            if response.get("ping") != "pong":
+                raise ConnectionError(f"API ping failed: {response}")
+            return response
+
+        try:
+            response = await ping_api()
+            logger.info("API ping successful: %s", response)
+        except Exception as e:
+            logger.error(f"Failed to ping API after retries: {type(e).__name__}: {str(e)}")
+            raise
+
+        # Initialize DataManager
+        logger.debug("Creating DataManager...")
         data_manager = DataManager(config=config, api=api, logger=logger)
+
+        # Start subscriptions with retries
+        @tenacity.retry(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
+            retry=tenacity.retry_if_result(lambda result: not any(status['success'] for status in result.values())),
+            before_sleep=lambda retry_state: logger.error(
+                f"Retrying subscriptions: attempt {retry_state.attempt_number}"
+            )
+        )
+        async def start_subscriptions_with_retry():
+            return await data_manager.start_subscriptions(config.SYMBOLS, fetch_historical=True)
+
+        logger.info("Starting data subscriptions for symbols: %s", config.SYMBOLS)
+        try:
+            subscription_results = await start_subscriptions_with_retry()
+        except Exception as e:
+            logger.error(f"Subscription retries failed: {type(e).__name__}: {str(e)}")
+            raise RuntimeError("Failed to start subscriptions after retries")
+
+        # Check if at least one symbol subscribed successfully
+        successful_subscriptions = sum(1 for status in subscription_results.values() if status['success'])
+        if successful_subscriptions == 0:
+            logger.error(f"No successful subscriptions: {subscription_results}")
+            raise RuntimeError("No symbols could be subscribed")
+
+        for symbol, status in subscription_results.items():
+            if status['success']:
+                logger.info(f"Subscription successful for {symbol}")
+            elif status.get('skipped'):
+                logger.info(f"Subscription skipped for {symbol}: {status['error']}")
+            else:
+                logger.warning(f"Subscription failed for {symbol}: {status['error']}")
+
+        # Wait for data to populate
+        await asyncio.sleep(5)  # Adjust based on API response time
+
+        # Check DataManager health
+        logger.debug("Checking DataManager health...")
+        is_healthy, status = data_manager.is_healthy(freshness_threshold=30)
+        if not is_healthy:
+            logger.error(f"DataManager not healthy: {status}")
+            raise RuntimeError("DataManager initialization failed")
+
+        # Validate data for each symbol
+        for symbol in config.SYMBOLS:
+            df = data_manager.get_snapshot(symbol)
+            if df is None or df.empty:
+                if subscription_results[symbol].get('skipped'):
+                    logger.info(f"No data for {symbol} (market closed, skipped)")
+                    continue
+                logger.error(f"No data for {symbol}")
+                raise RuntimeError(f"Data validation failed for {symbol}")
+            if not isinstance(df.index, pd.DatetimeIndex):
+                logger.error(f"Invalid index for {symbol}: {df.index}")
+                raise RuntimeError(f"Invalid index for {symbol}")
+            logger.debug(f"Data validated for {symbol}: shape={df.shape}")
+
+        # Initialize StrategyManager
+        logger.debug("Creating StrategyManager...")
         strategy_manager = StrategyManager(
             data_manager=data_manager, api=api, logger=logger
         )
 
+        # Initialize ForexBot
+        logger.debug("Creating ForexBot...")
         bot = ForexBot(
             config=config,
             data_manager=data_manager,
@@ -65,105 +158,97 @@ async def main() -> Tuple[Dict[str, Union[List[Dict], Dict]], "ForexBot", DerivA
         )
 
         # Authorization
+        logger.debug("Authorizing API with token...")
         try:
             auth_response = await asyncio.wait_for(
                 api.authorize({"authorize": config.DERIV_API_TOKEN}), timeout=15
             )
             if not auth_response.get("authorize", {}).get("loginid"):
-                raise ConnectionError("Authorization failed")
+                raise ConnectionError(f"Authorization failed: {auth_response}")
             logger.info("Authorization successful")
         except asyncio.TimeoutError:
             logger.error("Authorization timed out")
             raise
         except Exception as e:
-            logger.error("Authorization failed: %s", str(e))
+            logger.error(f"Authorization failed: {type(e).__name__}: {str(e)}")
             raise
 
-        # Fetching historical data
+        # Fetch additional historical data if needed
+        logger.debug("Calculating historical data timestamps...")
         timestamp_utils = TimestampUtils()
-        start_ts = (
-            timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) - 172800
-        )  # 1 day ago
-        end_ts = ( 
-            timestamp_utils.to_seconds(datetime.now(tz=timezone.utc)) -86400
-        
-        )
+        end_time = datetime.now(tz=timezone.utc)
+        start_time = end_time - timedelta(days=config.HISTORICAL_DAYS)
 
-        logger.info("Fetching historical prices for frxEURUSD...")
-        try:
-            # Fetch historical data for all symbols in config.SYMBOLS
-            for symbol in config.SYMBOLS:
-                raw_data, prices = await asyncio.wait_for(
-                    data_manager.grab_historical_data(start_ts, end_ts, symbol),
-                    timeout=60,
+        logger.info("Fetching historical prices for %s...", config.SYMBOLS)
+        for symbol in config.SYMBOLS:
+            if subscription_results[symbol].get('skipped'):
+                logger.info(f"Skipping historical data fetch for {symbol} (market closed)")
+                continue
+            try:
+                success = await data_manager.grab_historical_data(
+                    symbol=symbol,
+                    granularity=60,
+                    count=1000,
+                    end_time=end_time
                 )
-                historical_data[symbol] = raw_data  # Store raw data per symbol
-                logger.debug("Raw historical data for %s: %s", symbol, raw_data)
-
-                if raw_data["candles"]:
-                    first_candle = raw_data["candles"][0]
-                    first_candle["datetime"] = datetime.fromtimestamp(
-                        first_candle["epoch"]
-                    ).isoformat()
-                    logger.info(
-                        "First candle datetime for %s: %s",
-                        symbol,
-                        first_candle["datetime"],
-                    )
+                if success:
+                    df = data_manager.get_snapshot(symbol)
+                    if df is not None and not df.empty:
+                        first_candle = {
+                            "epoch": df.index.min().timestamp(),
+                            "datetime": df.index.min().isoformat(),
+                            "close": df['close'].iloc[0]
+                        }
+                        historical_data[symbol]["candles"].append(first_candle)
+                        logger.info(
+                            "First candle datetime for %s: %s",
+                            symbol,
+                            first_candle["datetime"],
+                        )
+                    else:
+                        logger.info("No additional historical data for %s", symbol)
                 else:
-                    logger.info("No historical data for %s", symbol)
+                    logger.warning("Failed to fetch additional historical data for %s", symbol)
+            except Exception as e:
+                logger.error("Error fetching historical data for %s: %s", symbol, str(e))
 
-        except asyncio.TimeoutError:
-            logger.error("Historical data fetch timed out after 60 seconds")
-            historical_data = None
-        except Exception as e:
-            logger.error(
-                "Error fetching historical data: %s, type: %s",
-                str(e),
-                type(e).__name__,
-                exc_info=True,
-            )
-            historical_data[symbol] = {"candles": []}
+        logger.info("DataManager initialization completed.")
 
-        # Starting ForexBot with multiple background tasks
+        # Start background tasks
         logger.info("Starting ForexBot with multiple background tasks...")
         tasks = [
             asyncio.create_task(bot.run(), name="bot_run"),
-            asyncio.create_task(
-                bot.data_manager.start_subscriptions(), name="data_subs"
-            ),
-            asyncio.create_task(
-                bot.initialize_data_manager(data_manager), name="data_init"
-            ),
             asyncio.create_task(start_web_interface(bot), name="web_interface"),
             asyncio.create_task(run_blocking_tasks(bot, config), name="blocking_tasks"),
-            asyncio.create_task(event_loop_watchdog(config), name="watchdog"),
+            asyncio.create_task(event_loop_watchdog(config, data_manager), name="watchdog"),
+            asyncio.create_task(monitor_data_health(data_manager), name="data_health"),
         ]
         await asyncio.sleep(2)  # Allow tasks to start
 
         logger.info("All tasks scheduled")
-        return historical_data, bot, api  # Return the expected values
+        return historical_data, bot, api
 
     except Exception as e:
-        logger.critical("Critical error in main: %s", str(e), exc_info=True)
+        logger.critical(
+            f"Critical error in main: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+        )
         for task in tasks:
-            task.cancel()  # Cancel all tasks
+            task.cancel()
             try:
-                await task  # Await cancellation
+                await task
             except asyncio.CancelledError:
                 logger.debug("Task %s cancelled during error cleanup", task.get_name())
         if bot:
-            await bot.stop()  # Ensure the bot is stopped
+            await bot.stop()
         if api:
-            await api.clear()  # Clear the API
-        raise  # Re-raise the exception for further handling
+            await api.clear()
+        return historical_data, bot, api
 
     finally:
         tracemalloc.stop()
 
-
-async def event_loop_watchdog(config: Config):
-    """Monitors event loop health indefinitely."""
+async def event_loop_watchdog(config: Config, data_manager: DataManager):
+    """Monitors event loop health and DataManager status."""
     logger.info("Watchdog started in process %d", os.getpid())
     while True:
         start_time = time.monotonic()
@@ -175,56 +260,45 @@ async def event_loop_watchdog(config: Config):
             t for t in asyncio.all_tasks() if t is not asyncio.current_task()
         ]
         logger.debug("Active tasks: %d", len(current_tasks))
+        is_healthy, status = data_manager.is_healthy(freshness_threshold=30)
+        if not is_healthy:
+            logger.warning("DataManager unhealthy in watchdog: %s", status)
 
+async def monitor_data_health(data_manager: DataManager):
+    """Monitors DataManager health."""
+    logger.info("Data health monitor started")
+    while True:
+        is_healthy, status = data_manager.is_healthy(freshness_threshold=30)
+        if not is_healthy:
+            logger.warning("DataManager unhealthy, attempting to restart subscriptions: %s", status)
+            await data_manager.stop_subscriptions()
+            await data_manager.start_subscriptions(data_manager.config.SYMBOLS)
+        await asyncio.sleep(60)
 
 async def run_blocking_tasks(bot: ForexBot, config: Config):
-    """Run CPU-intensive tasks in executor indefinitely."""
+    """Run CPU-intensive tasks in executor."""
     logger.info("Blocking tasks started in process %d", os.getpid())
-    loop = asyncio.get_event_loop()
     while True:
         try:
-            await loop.run_in_executor(
-                None, partial(process_blocking_operations, bot, config)
-            )
-            await asyncio.sleep(1)
+            # Placeholder for CPU-intensive tasks (e.g., ML model updates)
+            await asyncio.sleep(60)
         except Exception as e:
             logger.error("Blocking task error: %s", str(e))
             await asyncio.sleep(5)
 
-
-def process_blocking_operations(bot: ForexBot, config: Config):
-    """Process blocking operations."""
-    symbols = (
-        config.SYMBOLS.split(",") if isinstance(config.SYMBOLS, str) else config.SYMBOLS
-    )
-    if symbols:
-        bot.create_tick_callback(symbols[0].strip())
-
-
 async def stop_bot(bot: ForexBot, api: DerivAPI):
+    """Stop the bot and clean up."""
     logger.info("Stopping bot")
     await bot.stop()
     await api.clear()
     logger.info("Bot stopped")
 
-
-if __name__ == "__main__":
+async def run_bot():
+    """Run the bot with proper event loop management."""
     logger.info("Main process started with PID %d", os.getpid())
     try:
-
-        async def run_with_cleanup():
-            try:
-                result = await main()  # Call the main function
-                logger.debug(f"Main returned: {result}")  # Log the result for debugging
-                return result
-            except Exception as e:
-                logger.error(f"Error in main function: {str(e)}")
-                return None  # Return None or a default value in case of an error
-
-        # Unpack the result safely
-        result = asyncio.run(run_with_cleanup(), debug=True)
-
-        # Check if result is valid before unpacking
+        result = await main()
+        logger.debug(f"Main returned: {result}")
         if result is None or len(result) != 3:
             logger.critical(
                 "Unexpected result from main function. Expected 3 values, got: %s",
@@ -232,8 +306,7 @@ if __name__ == "__main__":
             )
             sys.exit(1)
 
-        historical_data, bot, api = result  # Unpack the result safely
-
+        historical_data, bot, api = result
         logger.info("Main completed")
         if historical_data and any(historical_data.values()):
             for symbol, data in historical_data.items():
@@ -243,14 +316,17 @@ if __name__ == "__main__":
             logger.warning("No historical data returned from main()")
 
         logger.info("Bot running in background. Press Ctrl+C to stop.")
-        loop = asyncio.get_event_loop()
         try:
-            loop.run_forever()
+            await asyncio.Event().wait()  # Run indefinitely until interrupted
         except KeyboardInterrupt:
             logger.info("Received interrupt, stopping...")
-            asyncio.run(stop_bot(bot, api))  # Fixed syntax: pass as separate args
-            loop.close()
+            await stop_bot(bot, api)
 
     except Exception as e:
-        logger.critical("Application bootstrap failed: %s", str(e))
+        logger.critical(
+            f"Application bootstrap failed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+        )
         sys.exit(1)
+
+if __name__ == "__main__":
+    asyncio.run(run_bot())

@@ -1,21 +1,14 @@
-# Standard library imports
 import json
 import asyncio
-import re
-import time as time_true
 import pathlib
 from datetime import datetime, timezone, timedelta, UTC
-from typing import List, Dict, Union, Optional, Tuple
+from typing import List, Dict, Union, Optional
 
-# Third-party library imports
 import pandas as pd
-from tenacity import retry, wait_fixed, stop_after_attempt, RetryError
+from tenacity import retry, wait_fixed, stop_after_attempt
 import aiofiles
-from websockets.client import WebSocketClientProtocol
 from deriv_api import DerivAPI
-from rx import Observable
 
-# Local application/library-specific imports
 from config import Config
 from strategy import StrategyManager
 from portfolio_manager import PortfolioManager
@@ -25,7 +18,6 @@ from monitor import Monitor
 from data_manager import DataManager
 from utils import TimestampUtils, PerformanceMonitor
 
-
 class ForexBot:
     def __init__(
         self,
@@ -33,7 +25,7 @@ class ForexBot:
         data_manager: DataManager,
         strategy_manager: StrategyManager,
         logger,
-        api,
+        api: DerivAPI,
         paper_trading: bool = True,
     ):
         """Central trading bot with dependency injection."""
@@ -45,10 +37,8 @@ class ForexBot:
         self.strategy_manager = strategy_manager
         self.risk_manager = RiskManager(config)
         self.portfolio_manager = PortfolioManager(config)
-        self.backtester = Backtester(
-            config, api, self.data_manager, self.strategy_manager
-        )
-        self.monitor = Monitor(self.config, self.backtester)
+        self.backtester = Backtester(config, api, data_manager, strategy_manager)
+        self.monitor = Monitor(config, self.backtester)
         self.performance_monitor = PerformanceMonitor(self.portfolio_manager)
         self.subscriptions: Dict[str, dict] = {}
         self.active_trades: Dict[str, dict] = {}
@@ -57,99 +47,38 @@ class ForexBot:
         self.trading_account = "DEMO123"
         self.timestamp_utils = TimestampUtils()
         self.start_date = self.timestamp_utils.from_seconds(
-            self.timestamp_utils.to_seconds(datetime.now(tz=timezone.utc))
+            self.timestamp_utils.to_seconds(datetime.now(tz=UTC))
             - config.HISTORICAL_DAYS * 86400
         )
-        self.end_date = datetime.now(tz=timezone.utc)
-        self._bar_size = 1
-        self._bar_type = "minute"
+        self.end_date = datetime.now(tz=UTC)
 
     async def initialize(self):
-        """Asynchronous initialization method."""
-        await self._verify_api_connection()
-
-    async def initialize_data_manager(self, data_manager):
-        """Initializes the DataManager with historical data for specified symbols."""
-        start_date = datetime.strptime(self.config.BACKTEST_START_DATE, "%Y-%m-%d")
-        end_date = datetime.strptime(self.config.BACKTEST_END_DATE, "%Y-%m-%d")
-
-        # Convert to timestamps
-        start_ts = self.timestamp_utils.to_seconds(start_date)
-        end_ts = self.timestamp_utils.to_seconds(end_date)
-
-        # Loop over symbols or specify one
-        for symbol in self.config.SYMBOLS:  # Assuming SYMBOLS is a list of symbols
-            symbol_data, symbol_prices = await data_manager.grab_historical_data(
-                start_ts, end_ts, symbol
-            )
-
-            # Initialize DataManager with historical data
-            self.data_manager = DataManager(
-                self.config,
-                self.api,
-                self.logger,
-                data={symbol: {"raw": symbol_data, "prices": symbol_prices}},
-            )
-            self.logger.info(
-                f"DataManager initialized with historical data for {symbol}."
-            )
+        """Initialize bot, assuming DataManager and API are pre-configured."""
+        self.logger.info("ForexBot initialized successfully.")
 
     async def run(self):
+        """Run the bot's main loop."""
         self.running = True
         self.logger.info("ForexBot started running.")
-        await self.initialize()  # Call the asynchronous initialization method
+        await self.initialize()
         while self.running:
-            await self.check_trades()
-            await self.performance_monitor.update(self.portfolio_manager)
+            if self.is_market_open():
+                await self.check_trades()
+                await self.performance_monitor.update(self.portfolio_manager)
+            else:
+                self.logger.debug("Market closed, skipping trade checks.")
             await asyncio.sleep(1)
 
-    def _is_market_open(self) -> bool:
-        """Check if the market is open today."""
-        now = datetime.now(tz=timezone.utc)
-        # Example: Check if today is a weekday (Monday to Friday)
-        if now.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
-            self.logger.warning("Market is closed on weekends.")
+    def is_market_open(self, session: str = "regular") -> bool:
+        """Check if the market is open for the specified session."""
+        now = datetime.now(tz=UTC)
+        if now.weekday() >= 5 and (now.weekday() == 5 and now.hour < 17):  # Close Friday 17:00 UTC
+            self.logger.debug("Market closed on weekends.")
             return False
-        # Add additional checks for specific market hours
-        return self._market_open(13, 20)  # Example: Regular market hours
-
-    def _market_open(self, start_hour: int, end_hour: int) -> bool:
-        """Check if the market is open based on the given start and end hours."""
-        now = datetime.now(tz=timezone.utc)
-        start_time = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
-        end_time = now.replace(hour=end_hour, minute=0, second=0, microsecond=0)
-        return start_time <= now <= end_time
-
-    @property
-    def pre_market_open(self) -> bool:
-        """Check if the pre-market is open."""
-        return self._market_open(8, 9)
-
-    @property
-    def regular_market_open(self) -> bool:
-        """Check if the regular market is open."""
-        return self._market_open(13, 20)
-
-    @property
-    def post_market_open(self) -> bool:
-        """Check if the post-market is open."""
-        return self._market_open(20, 24)
-
-    async def _verify_api_connection(self) -> None:
-        """Verify Deriv API connection asynchronously."""
-        try:
-            response = await self.api.ping({"ping": 1})
-            self.logger.debug("Ping response: %s", response)
-            if response.get("ping") == "pong":
-                self.logger.info("Deriv API connection established")
-            else:
-                self.logger.error("Unexpected ping response: %s", response)
-                raise ValueError("API ping failed")
-        except Exception as e:
-            self.logger.error("Deriv API initialization failed: %s", str(e))
-            raise
+        return True  # Forex market is 24/5
 
     async def create_portfolio(self) -> PortfolioManager:
+        """Create and initialize portfolio."""
         self.logger.info(f"Creating portfolio for account {self.trading_account}.")
         portfolio = PortfolioManager(self.config, account_number=self.trading_account)
         portfolio.derivCli = self.api
@@ -165,12 +94,9 @@ class ForexBot:
         price: float = 0.0,
         stop_limit_price: float = 0.0,
     ) -> Backtester:
-        self.logger.info(
-            f"Creating trade {trade_id} - {enter_or_exit} {long_or_short} order."
-        )
-        trade = Backtester(
-            self.config, self.api, self.data_manager, self.strategy_manager
-        )
+        """Create a new trade."""
+        self.logger.info(f"Creating trade {trade_id} - {enter_or_exit} {long_or_short} order.")
+        trade = Backtester(self.config, self.api, self.data_manager, self.strategy_manager)
         trade.new_trade(
             trade_id=trade_id,
             order_type=order_type,
@@ -182,389 +108,160 @@ class ForexBot:
         trade.account = self.trading_account
         trade._td_client = self.api
         self.trades[trade_id] = trade
-        self.logger.info(f"Trade created successfully: {trade_id}")
+        self.logger.info(f"Trade created: {trade_id}")
         return trade
 
     async def delete_trade(self, trade_id: str) -> None:
-        self.logger.info(f"Attempting to delete trade {trade_id}.")
+        """Delete a trade by ID."""
         if trade_id in self.trades:
             del self.trades[trade_id]
-            self.logger.info(f"Trade {trade_id} deleted successfully.")
+            self.logger.info(f"Trade {trade_id} deleted.")
         else:
-            self.logger.error(f"Trade {trade_id} not found.")
+            self.logger.warning(f"Trade {trade_id} not found.")
 
-    async def grab_current_quotes(self) -> dict:
-        """
-        Fetches current quotes for all positions in the portfolio.
-
-        Returns:
-            dict: A dictionary of current quotes for the portfolio positions.
-        """
-        self.logger.info("Fetching current quotes for all positions.")
-        symbols = self.portfolio_manager.positions.keys()
+    async def grab_current_quotes(self) -> Dict[str, Dict]:
+        """Fetch current quotes for portfolio symbols."""
+        self.logger.info("Fetching current quotes.")
+        symbols = list(self.portfolio_manager.positions.keys())
+        if not symbols:
+            self.logger.debug("No symbols in portfolio to fetch quotes.")
+            return {}
         try:
             quotes = await self.api.active_symbols({"active_symbols": "brief"})
-            self.logger.info(f"Fetched quotes for {len(symbols)} symbols.")
-            return {
-                s["symbol"]: s
-                for s in quotes["active_symbols"]
-                if s["symbol"] in symbols
-            }
+            result = {s["symbol"]: s for s in quotes["active_symbols"] if s["symbol"] in symbols}
+            self.logger.info(f"Fetched quotes for {len(result)} symbols.")
+            return result
         except Exception as e:
-            self.logger.error(f"Error fetching quotes: {str(e)}")
+            self.logger.error(f"Error fetching quotes: {e}")
             return {}
 
-    async def get_latest_bar(self) -> List[dict]:
-        latest_prices = []
-        end_date = datetime.now(tz=UTC)
-        start_date = end_date - timedelta(days=1)
-        for symbol in self.config.SYMBOLS:
-            data = await self.grab_historical_data(
-                start_date, end_date, 1, "minute", [symbol]
-            )
-            if "aggregated" in data and data["aggregated"]:
-                latest_prices.append(data["aggregated"][-1])
-        return latest_prices
-
-    async def wait_till_next_bar(self, last_bar_timestamp: datetime) -> None:
-        last_bar_time = (
-            last_bar_timestamp
-            if last_bar_timestamp.tzinfo
-            else last_bar_timestamp.replace(tzinfo=timezone.utc)
-        )
-        next_bar_time = last_bar_time + timedelta(seconds=60)
-        curr_bar_time = datetime.now(tz=timezone.utc)
-        time_to_wait = max(
-            int(next_bar_time.timestamp() - curr_bar_time.timestamp()), 0
-        )
-        self.logger.info(f"Waiting {time_to_wait} seconds for next bar.")
-        await asyncio.sleep(time_to_wait)
-
-    async def create_stock_frame(self, data: List[dict]) -> DataManager:
-        self.stock_frame = DataManager(self.config, self.api, self.logger, data=data)
-        return self.stock_frame
-
-    async def execute_signals(
-        self, signals: List[pd.Series], trades_to_execute: dict
-    ) -> List[dict]:
-        """Executes the specified trades for each signal asynchronously.
-
-        Arguments:
-        ----
-        signals {list} -- A pandas.Series object representing the buy signals and sell signals.
-            Will check if series is empty before making any trades.
-
-        Trades:
-        ----
-        trades_to_execute {dict} -- the trades you want to execute if signals are found.
-
-        Returns:
-        ----
-        {List[dict]} -- Returns all order responses.
-        """
-        # Define the Buy and sells.
-        buys: pd.Series = signals["buys"]
-        sells: pd.Series = signals["sells"]
-
+    async def execute_signals(self, signals: Dict[str, pd.Series], trades_to_execute: Dict) -> List[Dict]:
+        """Execute trades based on signals."""
         order_responses = []
-
-        # If we have buys or sells continue.
-        if not buys.empty:
-            # Grab the buy Symbols.
-            symbols_list = buys.index.get_level_values(0).to_list()
-
-            # Loop through each symbol.
-            for symbol in symbols_list:
-                if symbol in trades_to_execute:
-                    if self.portfolio.in_portfolio(symbol=symbol):
-                        self.portfolio.set_ownership_status(
-                            symbol=symbol, ownership=True
-                        )
-
+        for signal_type, signal_data in [("buys", signals.get("buys", pd.Series())), ("sells", signals.get("sells", pd.Series()))]:
+            if signal_data.empty:
+                continue
+            symbols = signal_data.index.get_level_values(0).unique()
+            for symbol in symbols:
+                if symbol not in trades_to_execute or trades_to_execute[symbol].get("has_executed"):
+                    continue
+                trade_info = trades_to_execute[symbol][signal_type]
+                trade_obj = trade_info["trade_func"]
+                try:
+                    order_response = await self._execute_trade(trade_obj)
+                    order_responses.append(order_response)
                     trades_to_execute[symbol]["has_executed"] = True
-                    trade_obj: Trade = trades_to_execute[symbol]["buy"]["trade_func"]
-
-                    if not self.paper_trading:
-                        # Execute the order asynchronously.
-                        order_response = await self.execute_orders(trade_obj=trade_obj)
-                        order_response = {
-                            "order_id": order_response["order_id"],
-                            "request_body": order_response["request_body"],
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                        order_responses.append(order_response)
-                    else:
-                        order_response = {
-                            "order_id": trade_obj._generate_order_id(),
-                            "request_body": trade_obj.order,
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                        order_responses.append(order_response)
-
-        elif not sells.empty:
-            # Grab the sell Symbols.
-            symbols_list = sells.index.get_level_values(0).to_list()
-
-            # Loop through each symbol.
-            for symbol in symbols_list:
-                if symbol in trades_to_execute:
-                    trades_to_execute[symbol]["has_executed"] = True
-
-                    if self.portfolio.in_portfolio(symbol=symbol):
-                        self.portfolio.set_ownership_status(
-                            symbol=symbol, ownership=False
-                        )
-
-                    trade_obj: Trade = trades_to_execute[symbol]["sell"]["trade_func"]
-
-                    if not self.paper_trading:
-                        # Execute the order asynchronously.
-                        order_response = await self.execute_orders(trade_obj=trade_obj)
-                        order_response = {
-                            "order_id": order_response["order_id"],
-                            "request_body": order_response["request_body"],
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                        order_responses.append(order_response)
-                    else:
-                        order_response = {
-                            "order_id": trade_obj._generate_order_id(),
-                            "request_body": trade_obj.order,
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                        order_responses.append(order_response)
-
-        # Save the response asynchronously.
-        await self.save_orders(order_response_dict=order_responses)
-
+                    self.portfolio_manager.set_ownership_status(symbol, signal_type == "buys")
+                    self.logger.info(f"Executed {signal_type} trade for {symbol}")
+                except Exception as e:
+                    self.logger.error(f"Failed to execute {signal_type} trade for {symbol}: {e}")
+        if order_responses:
+            await self.save_orders(order_responses)
         return order_responses
 
-    async def execute_orders(self, trade_obj: Backtester) -> dict:
-        """Executes a Backtester Object asynchronously.
-
-        Arguments:
-        ----
-        trade_obj {Backtester} -- A Backtester object with the `order` property filled out.
-
-        Returns:
-        ----
-        {dict} -- An order response dictionary.
-        """
-        # Execute the order asynchronously.
-        order_dict = await self.api.place_order(
-            account=self.trading_account, order=trade_obj.order
-        )
-
-        # Store the order.
-        trade_obj._order_response = order_dict
-
-        # Process the order response.
-        trade_obj._process_order_response()
-
-        return order_dict
-
-    async def save_orders(self, order_response_dict: dict) -> bool:
-        """Saves the order to a JSON file for further review asynchronously."""
-        folder = pathlib.Path(__file__).parents[1].joinpath("data")
-        if not folder.exists():
-            folder.mkdir()
-
-        file_path = folder.joinpath("orders.json")
-
+    async def _execute_trade(self, trade_obj: Backtester) -> Dict:
+        """Execute a single trade."""
         try:
+            order_id = trade_obj._generate_order_id() if self.paper_trading else None
+            if not self.paper_trading:
+                order_dict = await self.api.place_order(account=self.trading_account, order=trade_obj.order)
+                trade_obj._order_response = order_dict
+                trade_obj._process_order_response()
+                order_id = order_dict["order_id"]
+            return {
+                "order_id": order_id,
+                "request_body": trade_obj.order,
+                "timestamp": datetime.now(tz=UTC).isoformat(),
+            }
+        except Exception as e:
+            self.logger.error(f"Trade execution failed: {e}")
+            raise
+
+    async def save_orders(self, order_response_dict: List[Dict]) -> bool:
+        """Save order responses to JSON file."""
+        folder = pathlib.Path(__file__).parents[1] / "data"
+        folder.mkdir(exist_ok=True)
+        file_path = folder / "orders.json"
+        try:
+            orders_list = []
             if file_path.exists():
-                async with aiofiles.open(file_path, mode="r") as order_json:
-                    orders_list = json.load(await order_json.read())
-            else:
-                orders_list = []
-
-            orders_list += order_response_dict
-
-            async with aiofiles.open(file_path, mode="w+") as order_json:
-                await order_json.write(json.dumps(orders_list, indent=4))
+                async with aiofiles.open(file_path, mode="r") as f:
+                    content = await f.read()
+                    if content:
+                        orders_list = json.loads(content)
+            orders_list.extend(order_response_dict)
+            async with aiofiles.open(file_path, mode="w") as f:
+                await f.write(json.dumps(orders_list, indent=4))
+            self.logger.info(f"Saved {len(order_response_dict)} orders to {file_path}")
             return True
         except Exception as e:
-            self.logger.error(f"Error saving orders: {str(e)}")
+            self.logger.error(f"Error saving orders: {e}")
             return False
 
     async def get_account_balances(self) -> List[Dict]:
-        """Fetches account balances asynchronously and parses them.
+        """Fetch account balances."""
+        try:
+            accounts_response = await self.api.get_accounts()
+            return self._parse_response(accounts_response, self._extract_account_data)
+        except Exception as e:
+            self.logger.error(f"Error fetching account balances: {e}")
+            return []
 
-        Returns:
-        ----
-        List[Dict]: A list of simplified account balance dictionaries.
-        """
-        accounts_response = (
-            await self.api.get_accounts()
-        )  # Assuming this is an async call
-        return self._parse_account_balances(accounts_response)
+    async def get_positions(self, account_number: str = None, all_accounts: bool = False) -> List[Dict]:
+        """Fetch account positions."""
+        account = "all" if all_accounts else (account_number or self.trading_account)
+        try:
+            positions = await self.api.get_accounts(account=account, fields=["positions"])
+            return self._parse_response(positions, self._extract_position_data)
+        except Exception as e:
+            self.logger.error(f"Error fetching positions: {e}")
+            return []
 
-    def _parse_account_balances(
-        self, accounts_response: Union[Dict, List]
-    ) -> List[Dict]:
-        """Parses an Account response into a more simplified dictionary.
+    def _parse_response(self, response: Union[List, Dict], extract_func) -> List[Dict]:
+        """Generic parser for account or position responses."""
+        result = []
+        if isinstance(response, dict):
+            for key, info in response.items():
+                item = extract_func(info, info.get("accountId"))
+                result.append(item)
+        elif isinstance(response, list):
+            for account in response:
+                for key, info in account.items():
+                    if "positions" in info:
+                        for position in info["positions"]:
+                            item = extract_func(position, info["accountId"])
+                            result.append(item)
+                    else:
+                        item = extract_func(info, info["accountId"])
+                        result.append(item)
+        return result
 
-        Arguments:
-        ----
-        accounts_response {Union[Dict, List]} -- A response from the `get_accounts` call.
-
-        Returns:
-        ----
-        List[Dict] -- A list of simplified account dictionaries.
-        """
-        account_lists = []
-
-        if isinstance(accounts_response, dict):
-            for account_type_key in accounts_response:
-                account_info = accounts_response[account_type_key]
-                account_dict = self._extract_account_data(account_info)
-                account_lists.append(account_dict)
-
-        elif isinstance(accounts_response, list):
-            for account in accounts_response:
-                for account_type_key in account:
-                    account_info = account[account_type_key]
-                    account_dict = self._extract_account_data(account_info)
-                    account_lists.append(account_dict)
-
-        return account_lists
-
-    def _extract_account_data(self, account_info: Dict) -> Dict:
-        """Extracts relevant data from an account information dictionary.
-
-        Arguments:
-        ----
-        account_info {Dict} -- The account information dictionary.
-
-        Returns:
-        ----
-        {Dict} -- A dictionary containing the extracted account data.
-        """
-        account_dict = {
-            "account_number": account_info["accountId"],
+    def _extract_account_data(self, account_info: Dict, account_id: str) -> Dict:
+        """Extract account balance data."""
+        return {
+            "account_number": account_id,
             "account_type": account_info["type"],
             "cash_balance": account_info["currentBalances"]["cashBalance"],
             "long_market_value": account_info["currentBalances"]["longMarketValue"],
-            "cash_available_for_trading": account_info["currentBalances"].get(
-                "cashAvailableForTrading", 0.0
-            ),
-            "cash_available_for_withdrawal": account_info["currentBalances"].get(
-                "cashAvailableForWithDrawal", 0.0
-            ),
-            "available_funds": account_info["currentBalances"].get(
-                "availableFunds", 0.0
-            ),
+            "cash_available_for_trading": account_info["currentBalances"].get("cashAvailableForTrading", 0.0),
+            "cash_available_for_withdrawal": account_info["currentBalances"].get("cashAvailableForWithDrawal", 0.0),
+            "available_funds": account_info["currentBalances"].get("availableFunds", 0.0),
             "buying_power": account_info["currentBalances"].get("buyingPower", 0.0),
-            "day_trading_buying_power": account_info["currentBalances"].get(
-                "dayTradingBuyingPower", 0.0
-            ),
-            "maintenance_call": account_info["currentBalances"].get(
-                "maintenanceCall", 0.0
-            ),
-            "maintenance_requirement": account_info["currentBalances"].get(
-                "maintenanceRequirement", 0.0
-            ),
+            "day_trading_buying_power": account_info["currentBalances"].get("dayTradingBuyingPower", 0.0),
+            "maintenance_call": account_info["currentBalances"].get("maintenanceCall", 0.0),
+            "maintenance_requirement": account_info["currentBalances"].get("maintenanceRequirement", 0.0),
             "short_balance": account_info["currentBalances"].get("shortBalance", 0.0),
-            "short_market_value": account_info["currentBalances"].get(
-                "shortMarketValue", 0.0
-            ),
-            "short_margin_value": account_info["currentBalances"].get(
-                "shortMarginValue", 0.0
-            ),
+            "short_market_value": account_info["currentBalances"].get("shortMarketValue", 0.0),
+            "short_margin_value": account_info["currentBalances"].get("shortMarginValue", 0.0),
         }
-        return account_dict
 
-    async def get_positions(
-        self, account_number: str = None, all_accounts: bool = False
-    ) -> List[Dict]:
-        """Gets all the positions for a specified account number asynchronously.
-
-        Arguments:
-        ----
-        account_number (str, optional): The account number of the account you want
-            to pull positions for. Defaults to None.
-
-        all_accounts (bool, optional): If you want to return all the positions for every
-            account then set to `True`. Defaults to False.
-
-        Returns:
-        ----
-        List[Dict]: A list of Position objects.
-        """
-        if all_accounts:
-            account = "all"
-        elif self.trading_account and account_number is None:
-            account = self.trading_account
-        else:
-            account = account_number
-
-        # Grab the positions asynchronously.
-        positions = await self.api.get_accounts(account=account, fields=["positions"])
-
-        # Parse the positions.
-        positions_parsed = self._parse_account_positions(positions_response=positions)
-
-        return positions_parsed
-
-    def _parse_account_positions(
-        self, positions_response: Union[List, Dict]
-    ) -> List[Dict]:
-        """Parses the response from the `get_positions` into a more simplified list.
-
-        Arguments:
-        ----
-        positions_response {Union[List, Dict]} -- Either a list or a dictionary that represents a position.
-
-        Returns:
-        ----
-        List[Dict] -- A more simplified list of positions.
-        """
-        positions_lists = []
-
-        if isinstance(positions_response, dict):
-            for account_type_key in positions_response:
-                account_info = positions_response[account_type_key]
-                account_id = account_info["accountId"]
-                positions = account_info["positions"]
-
-                for position in positions:
-                    position_dict = self._extract_position_data(account_id, position)
-                    positions_lists.append(position_dict)
-
-        elif isinstance(positions_response, list):
-            for account in positions_response:
-                for account_type_key in account:
-                    account_info = account[account_type_key]
-                    account_id = account_info["accountId"]
-                    positions = account_info["positions"]
-
-                    for position in positions:
-                        position_dict = self._extract_position_data(
-                            account_id, position
-                        )
-                        positions_lists.append(position_dict)
-
-        return positions_lists
-
-    def _extract_position_data(self, account_id: str, position: Dict) -> Dict:
-        """Extracts relevant data from a position dictionary.
-
-        Arguments:
-        ----
-        account_id {str} -- The account ID associated with the position.
-        position {Dict} -- The position dictionary.
-
-        Returns:
-        ----
-        {Dict} -- A dictionary containing the extracted position data.
-        """
-        position_dict = {
+    def _extract_position_data(self, position: Dict, account_id: str) -> Dict:
+        """Extract position data."""
+        return {
             "account_number": account_id,
             "average_price": position["averagePrice"],
             "market_value": position["marketValue"],
-            "current_day_profit_loss_percentage": position[
-                "currentDayProfitLossPercentage"
-            ],
+            "current_day_profit_loss_percentage": position["currentDayProfitLossPercentage"],
             "current_day_profit_loss": position["currentDayProfitLoss"],
             "long_quantity": position["longQuantity"],
             "short_quantity": position["shortQuantity"],
@@ -577,122 +274,73 @@ class ForexBot:
             "description": position["instrument"].get("description", ""),
             "type": position["instrument"].get("type", ""),
         }
-        return position_dict
-
-    async def run(self):
-        self.running = True
-        self.logger.info("ForexBot started running.")
-        await self._verify_api_connection()
-        for symbol in self.config.SYMBOLS:
-            await self.subscribe_to_symbol(symbol, self.api)
-        while self.running:
-            await self.check_trades()
-            await self.performance_monitor.update(self.portfolio_manager)
-            await asyncio.sleep(1)
-
-    async def subscribe_to_symbol(self, symbol, api):
-        try:
-            await api.ticks(symbol)
-            api.subscribe(self.create_tick_callback(symbol))
-            self.subscriptions[symbol] = {"symbol": symbol}
-            self.logger.info(f"Subscribed to {symbol} tick stream.")
-        except Exception as e:
-            self.logger.error(f"Error subscribing to {symbol}: {e}")
-
-    def create_tick_callback(self, symbol):
-        def callback(data):
-            self.data_manager.update(symbol, data)
-            self.logger.debug(f"Tick for {symbol}: {data}")
-
-        return callback
 
     async def check_trades(self):
-        """Check if any trade conditions are met and execute if necessary."""
+        """Check trade conditions and execute trades."""
         for symbol in self.config.SYMBOLS:
-            # Check if we should enter a trade
-            if await self.strategy_manager.should_enter_trade(symbol):
-                await self.enter_trade(symbol)
-
-            # Check if we should exit a trade
-            if await self.strategy_manager.should_exit_trade(symbol):
-                await self.exit_trade(symbol)
-
+            try:
+                if await self.strategy_manager.should_enter_trade(symbol):
+                    await self.enter_trade(symbol)
+                if symbol in self.active_trades and await self.strategy_manager.should_exit_trade(symbol):
+                    await self.exit_trade(symbol)
+            except Exception as e:
+                self.logger.error(f"Error checking trades for {symbol}: {e}")
         await self.monitor.check_open_positions(self.api)
 
-    async def enter_trade(self, symbol, contract_type="CALL"):
-        """Enter a trade with a specified contract type."""
-        if not self._is_market_open():
-            self.logger.warning(f"Cannot enter trade for {symbol}: Market is closed.")
+    async def enter_trade(self, symbol: str, contract_type: str = "CALL"):
+        """Enter a new trade."""
+        if not self.is_market_open():
+            self.logger.warning(f"Cannot enter trade for {symbol}: Market closed.")
             return
-
         if not self.risk_manager.can_enter_trade(symbol):
             self.logger.warning(f"Risk limit reached for {symbol}")
             return
+        try:
+            position_size = self.risk_manager.calculate_position_size(symbol)
+            contract = await self.api.buy(
+                {
+                    "contract_type": contract_type,
+                    "amount": position_size,
+                    "symbol": symbol,
+                    "duration": 5,
+                    "duration_unit": "m",
+                }
+            )
+            self.monitor.add_position(contract)
+            self.portfolio_manager.add_trade(symbol, contract)
+            self.active_trades[symbol] = {"contract_id": contract["contract_id"]}
+            self.logger.info(f"Entered trade for {symbol}: {contract}")
+        except Exception as e:
+            self.logger.error(f"Failed to enter trade for {symbol}: {e}")
 
-        position_size = self.risk_manager.calculate_position_size(symbol)
-        contract = await self.api.buy(
-            {
-                "contract_type": contract_type,
-                "amount": position_size,
-                "symbol": symbol,
-                "duration": 5,
-                "duration_unit": "m",
-            }
-        )
-        self.monitor.add_position(contract)
-        self.portfolio_manager.add_trade(symbol, contract)
-        self.active_trades[symbol] = {
-            "contract_id": contract["contract_id"]
-        }  # Store active trade
-        self.logger.info(f"Entered trade: {contract}")
-
-    async def exit_trade(self, symbol):
-        """Exit a trade for the given symbol."""
-        self.logger.info(f"Checking for open trades to exit for {symbol}.")
-
-        # Check if there are any active trades for the symbol
-        if symbol in self.active_trades:
-            trade = self.active_trades[symbol]
-            try:
-                # Assuming the trade object has an ID or reference to the contract
-                contract_id = trade[
-                    "contract_id"
-                ]  # Adjust based on your trade structure
-
-                # Call the API to close the trade
-                response = await self.api.close_position(contract_id)
-                if response.get("error"):
-                    self.logger.error(
-                        f"Error closing trade for {symbol}: {response['error']}"
-                    )
-                else:
-                    self.logger.info(
-                        f"Successfully exited trade for {symbol}. Response: {response}"
-                    )
-                    # Remove the trade from active trades
-                    del self.active_trades[symbol]
-            except Exception as e:
-                self.logger.error(
-                    f"Exception while exiting trade for {symbol}: {str(e)}"
-                )
-        else:
-            self.logger.warning(f"No active trade found for {symbol}.")
-
-    async def unsubscribe(self):
-        """Unsubscribe from all symbols."""
-        for symbol in self.subscriptions:
-            try:
-                await self.api.forget(symbol)
-            except Exception as e:
-                self.logger.error(f"Error unsubscribing from {symbol}: {e}")
-        self.subscriptions.clear()
+    async def exit_trade(self, symbol: str):
+        """Exit an active trade."""
+        if symbol not in self.active_trades:
+            self.logger.debug(f"No active trade for {symbol}.")
+            return
+        trade = self.active_trades[symbol]
+        try:
+            response = await self.api.sell({"contract_id": trade["contract_id"]})
+            if response.get("error"):
+                self.logger.error(f"Error exiting trade for {symbol}: {response['error']}")
+            else:
+                self.logger.info(f"Exited trade for {symbol}: {response}")
+                del self.active_trades[symbol]
+        except Exception as e:
+            self.logger.error(f"Exception exiting trade for {symbol}: {e}")
 
     async def stop(self):
+        """Stop the bot and clean up."""
         self.running = False
-        await self.unsubscribe()
+        await self.data_manager.stop_subscriptions()
         self.logger.info("ForexBot stopped.")
 
     async def run_backtest(self):
-        results = await self.backtester.run()
-        self.logger.info(f"Backtest results: {results}")
-        return results
+        """Run a backtest and return results."""
+        try:
+            results = await self.backtester.run()
+            self.logger.info(f"Backtest results: {results}")
+            return results
+        except Exception as e:
+            self.logger.error(f"Backtest failed: {e}")
+            return {}

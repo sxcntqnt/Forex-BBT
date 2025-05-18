@@ -1,388 +1,878 @@
-import pandas as pd
-from datetime import datetime
 import asyncio
-from config import Config
-from deriv_api import DerivAPI
-from typing import List, Dict, Union
-from pandas.core.groupby import DataFrameGroupBy
-from pandas.core.window import RollingGroupby
+import logging
+import threading
+import time
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Tuple, Union
+import pandas as pd
+import numpy as np
+from websockets.exceptions import ConnectionClosed, WebSocketException
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from deriv_api import DerivAPI
+from config import Config
 
 class DataManager:
-    def __init__(
-        self, config: Config, api, logger, data=None, max_data_points: int = 100000
-    ) -> None:
-        """Initializes the Stock Data Manager with real-time data from Deriv API.
+    """
+    Manages real-time and historical financial data for trading symbols using the Deriv API.
+
+    Handles Observable responses from modern deriv-api versions and provides enhanced
+    error handling and diagnostics for subscription management.
+    """
+
+    def __init__(self, config, api, logger=None, initial_data=None):
+        """
+        Initialize the DataManager.
 
         Args:
-            config: Configuration object with settings like symbols.
-            api: Connection object for the Deriv API.
-            logger: Logger object for logging.
-            data: Optional initial data (defaults to None).
-            max_data_points: Max number of data points to store for each symbol.
+            config: Configuration object containing settings
+            api: DerivAPI instance for WebSocket communication
+            logger: Logger instance (optional, creates default if None)
+            initial_data: Optional initial data dictionary
         """
         self.config = config
         self.api = api
-        self.symbols = config.SYMBOLS
-        self.max_data_points = max_data_points
-        self.data_frames = {
-            symbol: pd.DataFrame(
-                columns=[
-                    "symbol",
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "bid",
-                    "ask",
-                    "quote",
-                ]
-            )
-            for symbol in self.symbols
-        }
-        self.logger = logger
-        self.data = data if data is not None else {}
-        self.subscriptions = {}
-        self.last_data = {}
-        self._symbol_groups = None
-        self._frame = pd.DataFrame()
+        self.logger = logger or logging.getLogger(__name__)
+
+        # Thread-safe data storage
+        self._data_lock = threading.RLock()
+        self._data: Dict[str, pd.DataFrame] = {}
+
+        # Subscription management
+        self._subscriptions: Dict[str, str] = {}  # symbol -> subscription_id
+        self._observables: Dict[str, Any] = {}    # symbol -> observable object
+        self._subscription_status: Dict[str, Dict[str, Any]] = {}  # symbol -> status info
+        self._last_update: Dict[str, float] = {}  # symbol -> timestamp
+
+        # Connection status
+        self._is_connected = False
+
+        # Initialize with provided data
+        if initial_data:
+            self._initialize_data(initial_data)
+
+        self.logger.info("DataManager initialized successfully")
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
+    async def _make_api_request(self, request: Dict[str, Any]) -> Optional[Union[Dict[str, Any], Any]]:
+        """
+        Makes an API request with proper error handling.
+        Handles both traditional responses and Observable objects from modern deriv-api.
+
+        Args:
+            request: Request dictionary
+
+        Returns:
+            Response dictionary, Observable object, or None if failed
+        """
+        self.logger.debug(f"Making API request: {request}")
+
+        try:
+            if 'ticks_history' in request:
+                response = await self.api.ticks_history(request)
+            elif 'ticks' in request and 'subscribe' in request:
+                response = await self.api.subscribe(request)
+                self.logger.debug(f"Subscription response type: {type(response)}, content: {response}")
+                return response  # Return Observable directly for subscriptions
+            elif 'forget' in request:
+                response = await self.api.forget(request)
+            else:
+                response = await self.api.send(request)
+
+            self.logger.debug(f"API response type: {type(response)}, content: {response}")
+
+            # Only check for errors if response is a dictionary
+            if isinstance(response, dict) and response.get('error'):
+                error_msg = response['error'].get('message', str(response['error']))
+                self.logger.error(f"API error: {error_msg}")
+                return None
+
+            return response
+
+        except (ConnectionClosed, WebSocketException) as e:
+            self.logger.error(f"WebSocket error during API request: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error during API request: {e}")
+            return None
+
+
+    async def get_tradable_symbols(self, symbols: List[str]) -> List[str]:
+        """
+        Returns a list of symbols that are currently tradable (market open).
+
+        Args:
+            symbols: List of symbols to check
+
+        Returns:
+            List of tradable symbols
+        """
+        try:
+            request = {'active_symbols': 'brief'}
+            response = await self._make_api_request(request)
+            if response is None or response.get('error'):
+                self.logger.error(f"Failed to fetch active symbols: {response.get('error', 'No response')}")
+                return symbols  # Fallback to trying all symbols
+
+            tradable_symbols = []
+            for symbol_info in response.get('active_symbols', []):
+                symbol = symbol_info.get('symbol')
+                market_status = symbol_info.get('market_status', 'open').lower()
+                if symbol in symbols and market_status == 'open':
+                    tradable_symbols.append(symbol)
+
+            self.logger.info(f"Tradable symbols: {tradable_symbols}")
+            return tradable_symbols
+        except Exception as e:
+            self.logger.error(f"Error checking tradable symbols: {e}")
+            return symbols  # Fallback
+
+
+
+    def _initialize_data(self, initial_data: Dict[str, pd.DataFrame]) -> None:
+        """
+        Initialize internal data structures with provided historical data.
+
+        Args:
+            initial_data: Dictionary mapping symbols to their DataFrames
+        """
+        with self._data_lock:
+            for symbol, df in initial_data.items():
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    # Ensure datetime index
+                    if not isinstance(df.index, pd.DatetimeIndex):
+                        if 'timestamp' in df.columns:
+                            df.set_index('timestamp', inplace=True)
+                        df.index = pd.to_datetime(df.index)
+
+                    # Sort by timestamp
+                    df.sort_index(inplace=True)
+
+                    self._data[symbol] = df.copy()
+                    self._last_update[symbol] = time.time()
+
+                    self.logger.info(f"Initialized {symbol} with {len(df)} historical records")
 
     @property
-    def frame(self):
-        return self._frame
-
-    def create_subs_cb(self, symbol: str):
-        """Generates a callback function for real-time data updates.
-
-        Args:
-            symbol: The symbol to track.
+    def data(self) -> Dict[str, pd.DataFrame]:
+        """
+        Thread-safe access to stored data.
 
         Returns:
-            Callbackfunction to handle real-time tick data.
+            Dictionary of symbol -> DataFrame copies
         """
-        count = 0
+        with self._data_lock:
+            return {symbol: df.copy() for symbol, df in self._data.items()}
 
-        def cb(data):
-            nonlocal count
-            count += 1
-            self.last_data[symbol] = data
-            self.logger.debug(
-                f"Received data for symbol {symbol}: {data} (Count: {count})"
-            )
-            asyncio.get_event_loop().create_task(self.update(symbol, data))
+    @property
+    def _symbol_groups(self) -> Dict[str, pd.DataFrame]:
+        """
+        Groups DataFrames by symbol for indicator calculations.
 
-        return cb
+        Returns:
+            Dictionary of symbol -> DataFrame
+        """
+        return self.data
 
-    async def subscribe_to_ticks(self, symbol):
-        """Subscribe to tick stream for a given symbol."""
-        try:
-            if not isinstance(symbol, str) or not symbol:
-                self.logger.error(f"Invalid symbol: {symbol}")
-                return
-
-            tick_stream = await self.api.subscribe({"ticks": symbol, "subscribe": 1})
-            self.subscriptions[symbol] = tick_stream
-            tick_stream.subscribe(self.create_subs_cb(symbol))
-            self.logger.info(f"Subscribed to {symbol} tick stream.")
-        except Exception as e:
-            self.logger.error(f"Error subscribing to {symbol}: {e}")
-
-    async def start_subscriptions(self) -> None:
-        """Starts WebSocket subscriptions for all symbols."""
-        if not self.symbols:
-            self.logger.warning("No symbols to subscribe to.")
-            return
-
-        tasks = [self.subscribe_to_ticks(symbol) for symbol in self.symbols]
-
-        try:
-            await asyncio.gather(*tasks)
-            self.logger.info("All subscriptions started successfully.")
-        except Exception as e:
-            self.logger.error(f"Error during subscription: {e}")
-
-    async def update(self, symbol: str, tick: Dict[str, Union[int, float]]) -> None:
-        """Updates the DataFrame for the specified symbol with new tick data.
+    def get_snapshot(self, symbol: str) -> Optional[pd.DataFrame]:
+        """
+        Returns a thread-safe copy of the DataFrame for a specific symbol.
 
         Args:
-            symbol: The symbol being updated.
-            tick: The tick data (a dictionary containing price data).
+            symbol: Trading symbol
+
+        Returns:
+            DataFrame copy or None if symbol not found
         """
-        try:
-            if "tick" not in tick:
-                self.logger.error(
-                    f"Invalid tick data for symbol {symbol}: 'tick' key missing."
-                )
-                return
+        with self._data_lock:
+            if symbol in self._data:
+                return self._data[symbol].copy()
+            return None
 
-            epoch = tick["tick"].get("epoch")
-            ask = tick["tick"].get("ask")
-            bid = tick["tick"].get("bid")
-            quote = tick["tick"].get("quote")
+    def get_close_prices(self, symbol: str, periods: Optional[int] = None) -> Optional[np.ndarray]:
+        """
+        Returns an array of closing prices for a symbol.
 
-            if None in (epoch, ask, bid, quote):
-                self.logger.error(f"Incomplete tick data for symbol {symbol}: {tick}")
-                return
+        Args:
+            symbol: Trading symbol
+            periods: Number of recent periods to return (None for all)
 
-            new_data = pd.DataFrame(
-                {
-                    "symbol": [symbol],
-                    "timestamp": [epoch],
-                    "open": [bid],
-                    "high": [ask],
-                    "low": [bid],
-                    "close": [bid],
-                    "bid": [bid],
-                    "ask": [ask],
-                    "quote": [quote],
+        Returns:
+            Numpy array of close prices or None if symbol not found
+        """
+        df = self.get_snapshot(symbol)
+        if df is None or df.empty:
+            return None
+
+        close_prices = df['close'].values
+        if periods is not None and periods > 0:
+            close_prices = close_prices[-periods:]
+
+        return close_prices
+
+
+    def is_healthy(self, max_age_seconds: int = 60, freshness_threshold: int = None) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Checks if data subscriptions are active and data is recent.
+
+        Args:
+            max_age_seconds: Maximum age of data in seconds
+            freshness_threshold: Alternative name for max_age_seconds (for backward compatibility)
+
+        Returns:
+            Tuple of (is_healthy, status_details)
+        """
+        if freshness_threshold is not None:
+            max_age_seconds = freshness_threshold
+        current_time = time.time()
+        status = {
+            'connected': self._is_connected,
+            'active_subscriptions': len(self._subscriptions),
+            'symbols': {},
+            'stale_symbols': []
+        }
+
+        with self._data_lock:
+            for symbol in self._data.keys():
+                last_update = self._last_update.get(symbol, 0)
+                age = current_time - last_update
+                is_recent = age <= max_age_seconds
+                is_skipped = self._subscription_status.get(symbol, {}).get('status') == 'skipped'
+
+                status['symbols'][symbol] = {
+                    'last_update': datetime.fromtimestamp(last_update),
+                    'age_seconds': age,
+                    'is_recent': is_recent,
+                    'has_subscription': symbol in self._subscriptions,
+                    'is_skipped': is_skipped
                 }
-            )
 
-            if symbol in self.data_frames:
-                self.data_frames[symbol] = pd.concat(
-                    [self.data_frames[symbol], new_data]
-                ).tail(self.max_data_points)
-            else:
-                self.logger.warning(f"Symbol {symbol} not found in managed symbols.")
-        except KeyError as e:
-            self.logger.error(f"KeyError: Missing expected key in tick data - {e}")
-        except Exception as e:
-            self.logger.error(f"Error updating symbol {symbol}: {e}")
+                if not is_recent and not is_skipped:
+                    status['stale_symbols'].append(symbol)
+                    self.logger.warning(f"Stale data for {symbol}: {age:.1f}s old")
 
-    async def stop_subscriptions(self):
-        """Proper subscription cleanup"""
-        for symbol, sub in self.subscriptions.items():
-            try:
-                await self.api.forget(sub.id)
-            except Exception as e:
-                self.logger.error(f"Error unsubscribing {symbol}: {str(e)}")
-        self.subscriptions.clear()
+        is_healthy = (
+            self._is_connected and
+            len(self._subscriptions) > 0 and
+            len(status['stale_symbols']) == 0
+        )
 
-    def get_close_prices(self, symbol: str) -> List[float]:
-        """Retrieves the close prices for the specified symbol.
+        status['is_healthy'] = is_healthy
+        return is_healthy, status
 
-        Args:
-            symbol: The symbol for which to retrieve close prices.
+    async def _validate_api_connectivity(self) -> Tuple[bool, str]:
+        """
+        Validates API connectivity and authentication.
 
         Returns:
-            A list of close prices.
+            Tuple of (is_connected, status_message)
         """
-        df = self.data_frames.get(symbol)
-        if df is not None:
-            return df["close"].tolist()
-        else:
-            raise ValueError(f"Symbol '{symbol}' not found.")
+        try:
+            # Test basic connectivity
+            if hasattr(self.api, 'ping'):
+                response = await self.api.ping()
+                if response.get('error'):
+                    return False, f"Ping failed: {response['error']}"
 
+            # Test authentication if available
+            if hasattr(self.api, 'authorize') and hasattr(self.config, 'api_token'):
+                try:
+                    auth_response = await self.api.authorize(self.config.api_token)
+                    if auth_response.get('error'):
+                        return False, f"Authentication failed: {auth_response['error']}"
+                except Exception as e:
+                    self.logger.warning(f"Auth check failed (may be normal): {e}")
+
+            # Test time endpoint as fallback
+            if hasattr(self.api, 'time'):
+                time_response = await self.api.time()
+                if time_response.get('error'):
+                    return False, f"Time endpoint failed: {time_response['error']}"
+
+            self._is_connected = True
+            return True, "API connectivity validated successfully"
+
+        except (ConnectionClosed, WebSocketException) as e:
+            self._is_connected = False
+            return False, f"WebSocket connection error: {e}"
+        except Exception as e:
+            self._is_connected = False
+            return False, f"Unexpected connectivity error: {e}"
+
+    async def check_connection(self) -> bool:
+        """
+        Verifies the WebSocket connection to the Deriv API.
+
+        Returns:
+            True if connected, False otherwise
+        """
+        is_connected, message = await self._validate_api_connectivity()
+        if is_connected:
+            self.logger.debug(f"Connection check successful: {message}")
+        else:
+            self.logger.warning(f"Connection check failed: {message}")
+        return is_connected
+
+    async def _handle_observable_subscription(self, symbol: str, observable) -> bool:
+        """
+        Handles Observable-based subscription from modern deriv-api.
+
+        Args:
+            symbol: Trading symbol
+            observable: Observable object returned by API
+
+        Returns:
+            True if subscription setup successful, False otherwise
+        """
+        try:
+            # Store the observable for later cleanup
+            self._observables[symbol] = observable
+
+            # Define handlers for the observable
+            def on_next(response):
+                """Handle incoming tick data."""
+                try:
+                    if response.get('tick'):
+                        asyncio.create_task(self.tick_callback(symbol, response['tick']))
+                    else:
+                        self.logger.debug(f"Non-tick response for {symbol}: {response}")
+                except Exception as e:
+                    self.logger.error(f"Error in tick handler for {symbol}: {e}")
+
+            def on_error(error):
+                """Handle subscription errors."""
+                self.logger.error(f"Subscription error for {symbol}: {error}")
+                # Update subscription status
+                if symbol in self._subscription_status:
+                    self._subscription_status[symbol]['status'] = 'error'
+                    self._subscription_status[symbol]['error'] = str(error)
+                    self._subscription_status[symbol]['last_error_time'] = time.time()
+
+            def on_complete():
+                """Handle subscription completion."""
+                self.logger.info(f"Subscription completed for {symbol}")
+                if symbol in self._subscription_status:
+                    self._subscription_status[symbol]['status'] = 'completed'
+
+            # Subscribe to the observable
+            observable.subscribe(
+                on_next=on_next,
+                on_error=on_error,
+                on_completed=on_complete
+            )
+
+            self.logger.info(f"Observable subscription established for {symbol}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to setup observable subscription for {symbol}: {e}")
+            return False
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((ConnectionClosed, WebSocketException, asyncio.TimeoutError))
+    )
     async def grab_historical_data(
         self,
-        start_timestamp: int,
-        end_timestamp: int,
         symbol: str,
-        bar_type: str = "minute",
-    ) -> Union[Dict, List]:
-        """Fetches historical data for a single symbol.
+        granularity: int = 60,  # seconds
+        count: int = 1000,
+        end_time: Optional[datetime] = None
+    ) -> bool:
+        """
+        Fetches historical candlestick data for a symbol with pagination support.
 
         Args:
-            start_timestamp (int): Start time in seconds or datetime object
-            end_timestamp (int): End time in seconds or datetime object
-            symbol (str): Trading symbol to fetch data for
-            bar_type (str): Type of bars to fetch ('minute' or other)
+            symbol: Trading symbol
+            granularity: Timeframe in seconds (60=1min, 3600=1hour, etc.)
+            count: Number of candles to fetch
+            end_time: End time for historical data (None for latest)
 
         Returns:
-            Tuple containing dictionary of raw candle data and list of processed prices
-
-        Raises:
-            ValueError: If no historical data is available
-            Exception: For other API or processing errors
+            True if successful, False otherwise
         """
-        # Convert to seconds if datetime objects are passed
-        if isinstance(start_timestamp, datetime):
-            start_timestamp = int(start_timestamp.timestamp())
-        if isinstance(end_timestamp, datetime):
-            end_timestamp = int(end_timestamp.timestamp())
-
-        # Prepare the arguments for the ticks_history API call
-        args = {
-            "ticks_history": symbol,
-            "start": start_timestamp,
-            "end": end_timestamp,
-            "granularity": (
-                60 if bar_type == "minute" else 300
-            ),  # Set granularity based on bar type
-            "count": 5000,  # Limit the number of ticks
-            "adjust_start_time": 1,  # Adjust start time if necessary
-        }
-
-        self.logger.debug(f"Requesting ticks_history with args: {args}")
-
         try:
-            response = await self.api.ticks_history(args)
-            self.logger.debug(f"Response for {symbol}: {response}")
+            self.logger.info(f"Fetching historical data for {symbol} (granularity: {granularity}s, count: {count})")
 
-            if "error" in response:
-                self.logger.error(f"API error for {symbol}: {response['error']}")
-                raise Exception(f"API error: {response['error']['message']}")
+            # Prepare request parameters
+            request = {
+                'ticks_history': symbol,
+                'granularity': granularity,
+                'count': count,
+                'style': 'candles'
+            }
 
-            if "candles" not in response or not response["candles"]:
-                self.logger.warning(
-                    f"No candles data for {symbol} in response: {response}"
-                )
-                raise ValueError(f"No historical data available for {symbol}.")
+            if end_time:
+                request['end'] = int(end_time.timestamp())
+            else:
+                request['end'] = 'latest'
 
-            # Process the response to extract relevant data
-            symbol_data = {"candles": response["candles"]}
-            symbol_prices = [
-                {
-                    "symbol": symbol,
-                    "timestamp": candle["epoch"],
-                    "open": float(candle["open"]),
-                    "close": float(candle["close"]),
-                    "high": float(candle["high"]),
-                    "low": float(candle["low"]),
-                    "quote": float(
-                        candle["close"]
-                    ),  # Using close as quote for consistency
-                }
-                for candle in response["candles"]
-            ]
+            # Make API request
+            response = await self._make_api_request(request)
 
-            # Update the data_frames with historical data
-            if symbol in self.data_frames:
-                historical_df = pd.DataFrame(symbol_prices)
-                self.data_frames[symbol] = pd.concat(
-                    [self.data_frames[symbol], historical_df]
-                ).tail(self.max_data_points)
+            if response is None:
+                self.logger.error(f"Failed to get response for {symbol}")
+                return False
 
-            return symbol_data, symbol_prices
+            if response.get('error'):
+                error_msg = response['error'].get('message', str(response['error']))
+                self.logger.error(f"API error for {symbol}: {error_msg}")
+                return False
+
+            # Extract candles data
+            candles = response.get('candles', [])
+            if not candles:
+                self.logger.warning(f"No candles data received for {symbol}")
+                return False
+
+            # Convert to DataFrame
+            df_data = []
+            for candle in candles:
+                df_data.append({
+                    'timestamp': pd.to_datetime(candle['epoch'], unit='s'),
+                    'open': float(candle['open']),
+                    'high': float(candle['high']),
+                    'low': float(candle['low']),
+                    'close': float(candle['close'])
+                })
+
+            df = pd.DataFrame(df_data)
+            df.set_index('timestamp', inplace=True)
+            df.sort_index(inplace=True)
+
+            # Store data thread-safely
+            with self._data_lock:
+                if symbol in self._data:
+                    # Merge with existing data, avoiding duplicates
+                    existing_df = self._data[symbol]
+                    combined_df = pd.concat([existing_df, df])
+                    combined_df = combined_df[~combined_df.index.duplicated(keep='last')]
+                    combined_df.sort_index(inplace=True)
+                    self._data[symbol] = combined_df
+                else:
+                    self._data[symbol] = df
+
+                self._last_update[symbol] = time.time()
+
+            self.logger.info(f"Successfully fetched {len(df)} candles for {symbol}")
+            self.logger.debug(f"Fetched DataFrame for {symbol}: columns={df.columns}, index={df.index}")
+            return True
 
         except Exception as e:
-            self.logger.error(f"Error fetching data for {symbol}: {str(e)}")
-            raise
+            self.logger.error(f"Failed to fetch historical data for {symbol}: {e}")
+            return False
 
-    def get_ohlc_data(self, symbol: str) -> pd.DataFrame:
-        """Retrieves the OHLC data for the specified symbol.
+    async def tick_callback(self, symbol: str, tick_data: Dict[str, Any]) -> None:
+        """
+        Processes incoming tick data and updates the DataFrame.
 
         Args:
-            symbol: The symbol for which to retrieve OHLC data.
-
-        Returns:
-            A DataFrame containing OHLC data for the symbol.
+            symbol: Trading symbol
+            tick_data: Tick data from API
         """
-        df = self.data_frames.get(symbol)
-        if df is not None:
-            return df
-        else:
-            raise ValueError(f"Symbol '{symbol}' not found.")
+        try:
+            # Extract relevant information from tick
+            timestamp = pd.to_datetime(tick_data.get('epoch', time.time()), unit='s')
+            price = float(tick_data.get('quote', tick_data.get('bid', 0)))
 
-    @property
-    def symbol_groups(self) -> DataFrameGroupBy:
-        """Returns a GroupBy object of symbols in the data frames.
+            if price <= 0:
+                self.logger.warning(f"Invalid price received for {symbol}: {price}")
+                return
 
-        Returns:
-            A pandas GroupBy object grouped by symbol.
+            with self._data_lock:
+                if symbol not in self._data:
+                    # Initialize empty DataFrame if not exists
+                    self._data[symbol] = pd.DataFrame(columns=['open', 'high', 'low', 'close'])
+                    self._data[symbol].index.name = 'timestamp'
+
+                df = self._data[symbol]
+
+                # Update or create candle based on granularity
+                # For simplicity, we'll update the latest candle or create a new one
+                if df.empty or timestamp not in df.index:
+                    # Create new row
+                    df.loc[timestamp] = [price, price, price, price]
+                else:
+                    # Update existing candle
+                    df.loc[timestamp, 'high'] = max(df.loc[timestamp, 'high'], price)
+                    df.loc[timestamp, 'low'] = min(df.loc[timestamp, 'low'], price)
+                    df.loc[timestamp, 'close'] = price
+
+                # Keep only recent data to prevent memory issues
+                if len(df) > self.config.get('max_candles', 10000):
+                    df = df.tail(self.config.get('max_candles', 10000))
+                    self._data[symbol] = df
+
+                self._last_update[symbol] = time.time()
+
+            self.logger.debug(f"Processed tick for {symbol}: {tick_data}")
+
+        except Exception as e:
+            self.logger.error(f"Error processing tick for {symbol}: {e}")
+
+    async def update(self, symbol: str, tick_data: Dict[str, Any]) -> None:
         """
-        if not self.data:
-            return pd.DataFrame().groupby([])
-
-        return pd.concat(self.data.values()).groupby("symbol", as_index=False)
-
-    async def symbol_rolling_groups(self, size: int) -> RollingGroupby:
-        """Grabs rolling windows of data for each symbol.
+        Public interface to trigger the tick callback asynchronously.
 
         Args:
-            size: The size of the rolling window.
-
-        Returns:
-            A RollingGroupby object containing rolling windows of data.
+            symbol: Trading symbol
+            tick_data: Tick data to process
         """
-        df = pd.concat(self.data_frames.values())
-        return df.groupby("symbol").rolling(size)
+        await self.tick_callback(symbol, tick_data)
 
-    def add_rows(self, data: Dict) -> None:
-        """Adds new rows to the stock data.
+
+    async def start_subscriptions(self, symbols: List[str], fetch_historical: bool = True, retry_attempts: int = 3) -> Dict[str, Dict[str, Any]]:
+        """
+        Starts subscriptions for all configured symbols with enhanced error handling.
 
         Args:
-            data: A dictionary of quotes containing 'symbol', 'datetime', 'open', 'close', 'high', 'low', 'volume'.
-        """
-        column_names = ["open", "close", "high", "low", "volume"]
-
-        for quote in data:
-            time_stamp = pd.to_datetime(quote["datetime"], unit="ms", origin="unix")
-            row_id = (quote["symbol"], time_stamp)
-            row_values = [
-                quote["open"],
-                quote["close"],
-                quote["high"],
-                quote["low"],
-                quote["volume"],
-            ]
-            new_row = pd.Series(data=row_values, index=column_names)
-            self.data_frames[quote["symbol"]].loc[row_id] = new_row
-
-    def do_indicator_exist(self, column_names: List[str]) -> bool:
-        """Checks if the specified indicator columns exist in the data frames.
-
-        Args:
-            column_names: A list of column names to check.
+            symbols: List of symbols to subscribe to
+            fetch_historical: Whether to fetch initial historical data
+            retry_attempts: Number of retry attempts per symbol
 
         Returns:
-            True if all columns exist, otherwise False.
+            Dictionary of symbol -> detailed status information
         """
-        for symbol in self.symbols:
-            df = self.data_frames.get(symbol)
-            if df is None or not all(col in df.columns for col in column_names):
-                return False
-        return True
+        # Validate API connectivity first
+        is_connected, connectivity_message = await self._validate_api_connectivity()
+        if not is_connected:
+            self.logger.error(f"API connectivity validation failed: {connectivity_message}")
+            return {symbol: {
+                'success': False,
+                'error': f"API not connected: {connectivity_message}",
+                'timestamp': time.time()
+            } for symbol in symbols}
 
-    def _check_signals(
-        self,
-        indicators: Dict,
-        indicators_comp_key: List[str],
-        indicators_key: List[str],
-    ) -> Union[pd.DataFrame, None]:
-        """Checks for buy/sell signals based on indicator conditions.
+        # Filter tradable symbols
+        tradable_symbols = await self.get_tradable_symbols(symbols)
+        if not tradable_symbols:
+            self.logger.error("No tradable symbols available")
+            return {symbol: {
+                'success': False,
+                'error': "No tradable symbols available",
+                'timestamp': time.time()
+            } for symbol in symbols}
 
-        Args:
-            indicators: A dictionary containing indicator configurations.
-            indicators_comp_key: A list of comparative indicator keys.
-            indicators_key: A list of regular indicator keys.
+        results = {}
+        skipped_symbols = set(symbols) - set(tradable_symbols)
+        for symbol in skipped_symbols:
+            results[symbol] = {
+                'success': False,
+                'subscription_id': None,
+                'historical_data': False,
+                'error': "Market closed",
+                'attempts': 0,
+                'skipped': True,
+                'timestamp': time.time()
+            }
+            self._subscription_status[symbol] = {
+                'status': 'skipped',
+                'start_time': time.time(),
+                'attempts': 0,
+                'last_error': None,
+                'last_error_time': None
+            }
+            self.logger.warning(f"Skipping {symbol} as market is closed")
+
+        for symbol in tradable_symbols:
+            symbol_status = {
+                'success': False,
+                'subscription_id': None,
+                'historical_data': False,
+                'error': None,
+                'attempts': 0,
+                'skipped': False,
+                'timestamp': time.time()
+            }
+
+            # Initialize subscription status tracking
+            self._subscription_status[symbol] = {
+                'status': 'attempting',
+                'start_time': time.time(),
+                'attempts': 0,
+                'last_error': None,
+                'last_error_time': None
+            }
+
+            # Retry logic for each symbol
+            for attempt in range(retry_attempts):
+                symbol_status['attempts'] = attempt + 1
+                self._subscription_status[symbol]['attempts'] = attempt + 1
+
+                try:
+                    self.logger.info(f"Attempting subscription for {symbol} (attempt {attempt + 1}/{retry_attempts})")
+
+                    # Fetch historical data if requested
+                    if fetch_historical:
+                        historical_success = await self.grab_historical_data(symbol)
+                        symbol_status['historical_data'] = historical_success
+                        if historical_success:
+                            self.logger.info(f"Historical data fetched successfully for {symbol}")
+                        else:
+                            self.logger.warning(f"Failed to fetch historical data for {symbol}")
+
+                    # Start tick subscription
+                    subscription_request = {
+                        'ticks': symbol,
+                        'subscribe': 1
+                    }
+
+                    response = await self._make_api_request(subscription_request)
+
+                    if response is None:
+                        symbol_status['error'] = f"No response received (attempt {attempt + 1})"
+                        self.logger.error(f"No response received for {symbol} subscription (attempt {attempt + 1})")
+                        continue
+
+                    # Handle Observable response (modern deriv-api)
+                    if hasattr(response, 'subscribe') and callable(getattr(response, 'subscribe')):
+                        self.logger.info(f"Received Observable response for {symbol}")
+                        observable_success = await self._handle_observable_subscription(symbol, response)
+                        if observable_success:
+                            # For observables, we don't get a traditional subscription ID
+                            self._subscriptions[symbol] = f"observable_{symbol}_{int(time.time())}"
+                            symbol_status['success'] = True
+                            symbol_status['subscription_id'] = self._subscriptions[symbol]
+                            self._subscription_status[symbol]['status'] = 'active'
+                            self.logger.info(f"Successfully subscribed to {symbol} via Observable")
+                            break
+                        else:
+                            symbol_status['error'] = f"Failed to setup Observable subscription (attempt {attempt + 1})"
+                            if symbol in self._subscriptions:
+                                del self._subscriptions[symbol]
+                            continue
+
+                    # Handle traditional dictionary response
+                    elif isinstance(response, dict):
+                        if response.get('error'):
+                            error_msg = response['error'].get('message', str(response['error']))
+                            if "market is presently closed" in error_msg.lower():
+                                symbol_status['error'] = f"Market closed: {error_msg} (attempt {attempt + 1})"
+                                self.logger.warning(f"Skipping {symbol} due to closed market: {error_msg}")
+                                symbol_status['success'] = False
+                                symbol_status['skipped'] = True
+                                self._subscription_status[symbol]['status'] = 'skipped'
+                                break
+                            else:
+                                symbol_status['error'] = f"API error: {error_msg} (attempt {attempt + 1})"
+                                self.logger.error(f"Subscription error for {symbol}: {error_msg} (attempt {attempt + 1})")
+                                continue
+
+                        # Extract subscription ID from traditional response
+                        subscription_id = response.get('subscription', {}).get('id')
+                        if subscription_id:
+                            self._subscriptions[symbol] = subscription_id
+                            symbol_status['success'] = True
+                            symbol_status['subscription_id'] = subscription_id
+                            self._subscription_status[symbol]['status'] = 'active'
+                            self.logger.info(f"Successfully subscribed to {symbol} (ID: {subscription_id})")
+                            break
+                        else:
+                            symbol_status['error'] = f"No subscription ID in response (attempt {attempt + 1})"
+                            self.logger.error(f"No subscription ID received for {symbol} (attempt {attempt + 1})")
+                            continue
+
+                    else:
+                        symbol_status['error'] = f"Unexpected response type: {type(response)} (attempt {attempt + 1})"
+                        self.logger.error(f"Unexpected response type for {symbol}: {type(response)} (attempt {attempt + 1})")
+                        continue
+
+                except Exception as e:
+                    symbol_status['error'] = f"Exception: {str(e)} (attempt {attempt + 1})"
+                    self.logger.error(f"Failed to start subscription for {symbol} (attempt {attempt + 1}): {e}")
+                    self._subscription_status[symbol]['last_error'] = str(e)
+                    self._subscription_status[symbol]['last_error_time'] = time.time()
+
+                    # Wait before retry (except on last attempt)
+                    if attempt < retry_attempts - 1:
+                        wait_time = 2 ** attempt  # Exponential backoff
+                        self.logger.info(f"Waiting {wait_time}s before retry for {symbol}")
+                        await asyncio.sleep(wait_time)
+
+            # Update final status
+            if not symbol_status['success'] and not symbol_status['skipped']:
+                self._subscription_status[symbol]['status'] = 'failed'
+
+            results[symbol] = symbol_status
+
+        # Update connection status
+        successful_subscriptions = sum(1 for status in results.values() if status['success'])
+        self._is_connected = successful_subscriptions > 0
+
+        self.logger.info(f"Subscription results: {successful_subscriptions}/{len(symbols)} successful")
+
+        # Log detailed results
+        for symbol, status in results.items():
+            if status['success']:
+                self.logger.info(f"✓ {symbol}: subscribed successfully (ID: {status['subscription_id']})")
+            elif status['skipped']:
+                self.logger.info(f"↷ {symbol}: skipped (market closed)")
+            else:
+                self.logger.error(f"✗ {symbol}: failed after {status['attempts']} attempts - {status['error']}")
+
+        return results
+
+    async def stop_subscriptions(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Stops all active subscriptions with enhanced error handling.
 
         Returns:
-            A DataFrame containing buy/sell conditions, or None if no signals.
+            Dictionary of symbol -> detailed status information
         """
-        last_rows = pd.concat(self.data_frames.values()).tail(1)
+        results = {}
 
-        conditions = {}
-        if self.do_indicator_exist(indicators_key):
-            for indicator in indicators_key:
-                buy_condition = indicators[indicator]["buy"]
-                sell_condition = indicators[indicator]["sell"]
-                buy_operator = indicators[indicator]["buy_operator"]
-                sell_operator = indicators[indicator]["sell_operator"]
+        # Handle Observable subscriptions
+        for symbol, observable in self._observables.items():
+            try:
+                if hasattr(observable, 'dispose'):
+                    observable.dispose()
+                elif hasattr(observable, 'unsubscribe'):
+                    observable.unsubscribe()
 
-                buy_condition_met = buy_operator(last_rows[indicator], buy_condition)
-                sell_condition_met = sell_operator(last_rows[indicator], sell_condition)
+                results[symbol] = {
+                    'success': True,
+                    'method': 'observable_disposal',
+                    'timestamp': time.time()
+                }
+                self.logger.info(f"Successfully disposed Observable subscription for {symbol}")
 
-                conditions["buys"] = buy_condition_met.where(lambda x: x).dropna()
-                conditions["sells"] = sell_condition_met.where(lambda x: x).dropna()
+            except Exception as e:
+                results[symbol] = {
+                    'success': False,
+                    'error': str(e),
+                    'method': 'observable_disposal',
+                    'timestamp': time.time()
+                }
+                self.logger.error(f"Failed to dispose Observable subscription for {symbol}: {e}")
 
-        return pd.DataFrame(conditions) if conditions else None
+        # Clear observables
+        self._observables.clear()
 
-    def reset_data(self) -> None:
-        """Resets all internal data structures, clearing all stored information."""
-        self.data_frames = {
-            symbol: pd.DataFrame(
-                columns=[
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "bid",
-                    "ask",
-                    "quote",
-                ]
-            )
-            for symbol in self.symbols
+        # Handle traditional subscriptions
+        subscriptions_copy = dict(self._subscriptions)
+
+        for symbol, subscription_id in subscriptions_copy.items():
+            # Skip if already handled as observable
+            if symbol in results:
+                continue
+
+            try:
+                # Send unsubscribe request
+                unsubscribe_request = {
+                    'forget': subscription_id
+                }
+
+                response = await self._make_api_request(unsubscribe_request)
+
+                if response is None:
+                    results[symbol] = {
+                        'success': False,
+                        'error': 'No response received',
+                        'method': 'traditional_unsubscribe',
+                        'timestamp': time.time()
+                    }
+                    self.logger.error(f"No response received for {symbol} unsubscribe")
+                elif response.get('error'):
+                    error_msg = response['error'].get('message', str(response['error']))
+                    results[symbol] = {
+                        'success': False,
+                        'error': error_msg,
+                        'method': 'traditional_unsubscribe',
+                        'timestamp': time.time()
+                    }
+                    self.logger.error(f"Unsubscribe error for {symbol}: {error_msg}")
+                else:
+                    results[symbol] = {
+                        'success': True,
+                        'method': 'traditional_unsubscribe',
+                        'timestamp': time.time()
+                    }
+                    self.logger.info(f"Successfully unsubscribed from {symbol}")
+
+                # Remove from active subscriptions regardless of result
+                del self._subscriptions[symbol]
+
+            except Exception as e:
+                results[symbol] = {
+                    'success': False,
+                    'error': str(e),
+                    'method': 'traditional_unsubscribe',
+                    'timestamp': time.time()
+                }
+                self.logger.error(f"Failed to stop subscription for {symbol}: {e}")
+
+        # Clear subscription status
+        self._subscription_status.clear()
+
+        # Update connection status
+        if not self._subscriptions and not self._observables:
+            self._is_connected = False
+
+        successful_stops = sum(1 for status in results.values() if status['success'])
+        self.logger.info(f"Stopped subscriptions: {successful_stops}/{len(results)} successful")
+
+        return results
+
+    def get_subscription_status(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Returns detailed status information for all subscriptions.
+
+        Returns:
+            Dictionary of symbol -> status information
+        """
+        status = {}
+        current_time = time.time()
+
+        for symbol in set(list(self._subscriptions.keys()) + list(self._observables.keys())):
+            symbol_status = self._subscription_status.get(symbol, {})
+
+            status[symbol] = {
+                'has_traditional_subscription': symbol in self._subscriptions,
+                'has_observable_subscription': symbol in self._observables,
+                'subscription_id': self._subscriptions.get(symbol),
+                'status': symbol_status.get('status', 'unknown'),
+                'attempts': symbol_status.get('attempts', 0),
+                'last_error': symbol_status.get('last_error'),
+                'last_error_time': symbol_status.get('last_error_time'),
+                'uptime_seconds': current_time - symbol_status.get('start_time', current_time),
+                'last_data_update': self._last_update.get(symbol),
+                'data_available': symbol in self._data and not self._data[symbol].empty
+            }
+
+        return status
+
+    def get_data_summary(self) -> Dict[str, Any]:
+        """
+        Returns a comprehensive summary of stored data for monitoring purposes.
+
+        Returns:
+            Dictionary containing data summary
+        """
+        summary = {
+            'symbols_count': len(self._data),
+            'active_traditional_subscriptions': len(self._subscriptions),
+            'active_observable_subscriptions': len(self._observables),
+            'total_active_subscriptions': len(self._subscriptions) + len(self._observables),
+            'api_connected': self._is_connected,
+            'symbols': {}
         }
+
+        with self._data_lock:
+            for symbol, df in self._data.items():
+                summary['symbols'][symbol] = {
+                    'candles_count': len(df),
+                    'date_range': {
+                        'start': df.index.min().isoformat() if not df.empty else None,
+                        'end': df.index.max().isoformat() if not df.empty else None
+                    },
+                    'latest_price': df['close'].iloc[-1] if not df.empty else None,
+                    'last_update': datetime.fromtimestamp(
+                        self._last_update.get(symbol, 0)
+                    ).isoformat(),
+                    'has_traditional_subscription': symbol in self._subscriptions,
+                    'mutate_subscription': symbol in self._observables,
+                    'subscription_status': self._subscription_status.get(symbol, {}).get('status', 'unknown')
+                }
+
+        return summary
