@@ -20,7 +20,7 @@ class DataManager:
     error handling and diagnostics for subscription management.
     """
 
-    def __init__(self, config, api, logger=None, initial_data=None):
+    def __init__(self, config: Config, api: DerivAPI, logger: Optional[logging.Logger] = None, initial_data: Optional[Dict[str, pd.DataFrame]] = None):
         """
         Initialize the DataManager.
 
@@ -52,6 +52,17 @@ class DataManager:
             self._initialize_data(initial_data)
 
         self.logger.info("DataManager initialized successfully")
+
+    def copy(self):
+        """
+        Returns a copy of the DataManager's data dictionary.
+        This method is required for compatibility with stratestic library.
+        
+        Returns:
+            Dictionary of symbol -> DataFrame copies
+        """
+        with self._data_lock:
+            return {symbol: df.copy() for symbol, df in self._data.items()}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
     async def _make_api_request(self, request: Dict[str, Any]) -> Optional[Union[Dict[str, Any], Any]]:
@@ -96,7 +107,6 @@ class DataManager:
             self.logger.error(f"Unexpected error during API request: {e}")
             return None
 
-
     async def get_tradable_symbols(self, symbols: List[str]) -> List[str]:
         """
         Returns a list of symbols that are currently tradable (market open).
@@ -126,8 +136,6 @@ class DataManager:
         except Exception as e:
             self.logger.error(f"Error checking tradable symbols: {e}")
             return symbols  # Fallback
-
-
 
     def _initialize_data(self, initial_data: Dict[str, pd.DataFrame]) -> None:
         """
@@ -210,8 +218,7 @@ class DataManager:
 
         return close_prices
 
-
-    def is_healthy(self, max_age_seconds: int = 60, freshness_threshold: int = None) -> Tuple[bool, Dict[str, Any]]:
+    def is_healthy(self, max_age_seconds: int = 60, freshness_threshold: Optional[int] = None) -> Tuple[bool, Dict[str, Any]]:
         """
         Checks if data subscriptions are active and data is recent.
 
@@ -313,7 +320,7 @@ class DataManager:
             self.logger.warning(f"Connection check failed: {message}")
         return is_connected
 
-    async def _handle_observable_subscription(self, symbol: str, observable) -> bool:
+    async def _handle_observable_subscription(self, symbol: str, observable: Any) -> bool:
         """
         Handles Observable-based subscription from modern deriv-api.
 
@@ -489,7 +496,6 @@ class DataManager:
                 df = self._data[symbol]
 
                 # Update or create candle based on granularity
-                # For simplicity, we'll update the latest candle or create a new one
                 if df.empty or timestamp not in df.index:
                     # Create new row
                     df.loc[timestamp] = [price, price, price, price]
@@ -520,7 +526,6 @@ class DataManager:
             tick_data: Tick data to process
         """
         await self.tick_callback(symbol, tick_data)
-
 
     async def start_subscriptions(self, symbols: List[str], fetch_historical: bool = True, retry_attempts: int = 3) -> Dict[str, Dict[str, Any]]:
         """
@@ -810,69 +815,140 @@ class DataManager:
             self._is_connected = False
 
         successful_stops = sum(1 for status in results.values() if status['success'])
-        self.logger.info(f"Stopped subscriptions: {successful_stops}/{len(results)} successful")
-
+        self.logger.info(f"Stopped {successful_stops}/{len(subscriptions_copy) + len(self._observables)} subscriptions")
         return results
 
-    def get_subscription_status(self) -> Dict[str, Dict[str, Any]]:
+    async def get_subscription_status(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         """
-        Returns detailed status information for all subscriptions.
+        Retrieves the current subscription status for a specific symbol or all symbols.
+
+        Args:
+            symbol: Trading symbol to check (None for all symbols)
 
         Returns:
-            Dictionary of symbol -> status information
+            Dictionary with subscription status information
         """
-        status = {}
-        current_time = time.time()
+        with self._data_lock:
+            if symbol:
+                if symbol in self._subscription_status:
+                    return {symbol: self._subscription_status[symbol].copy()}
+                else:
+                    return {symbol: {
+                        'status': 'not_subscribed',
+                        'start_time': None,
+                        'attempts': 0,
+                        'last_error': None,
+                        'last_error_time': None
+                    }}
+            else:
+                return {s: status.copy() for s, status in self._subscription_status.items()}
 
-        for symbol in set(list(self._subscriptions.keys()) + list(self._observables.keys())):
-            symbol_status = self._subscription_status.get(symbol, {})
-
-            status[symbol] = {
-                'has_traditional_subscription': symbol in self._subscriptions,
-                'has_observable_subscription': symbol in self._observables,
-                'subscription_id': self._subscriptions.get(symbol),
-                'status': symbol_status.get('status', 'unknown'),
-                'attempts': symbol_status.get('attempts', 0),
-                'last_error': symbol_status.get('last_error'),
-                'last_error_time': symbol_status.get('last_error_time'),
-                'uptime_seconds': current_time - symbol_status.get('start_time', current_time),
-                'last_data_update': self._last_update.get(symbol),
-                'data_available': symbol in self._data and not self._data[symbol].empty
-            }
-
-        return status
-
-    def get_data_summary(self) -> Dict[str, Any]:
+    async def cleanup_old_data(self, max_age_days: float = 7.0) -> Dict[str, int]:
         """
-        Returns a comprehensive summary of stored data for monitoring purposes.
+        Removes data older than the specified age to manage memory usage.
+
+        Args:
+            max_age_days: Maximum age of data to keep in days
 
         Returns:
-            Dictionary containing data summary
+            Dictionary of symbol -> number of removed rows
         """
-        summary = {
-            'symbols_count': len(self._data),
-            'active_traditional_subscriptions': len(self._subscriptions),
-            'active_observable_subscriptions': len(self._observables),
-            'total_active_subscriptions': len(self._subscriptions) + len(self._observables),
-            'api_connected': self._is_connected,
-            'symbols': {}
-        }
+        results = {}
+        cutoff_time = pd.Timestamp.now() - pd.Timedelta(days=max_age_days)
 
         with self._data_lock:
             for symbol, df in self._data.items():
-                summary['symbols'][symbol] = {
-                    'candles_count': len(df),
-                    'date_range': {
-                        'start': df.index.min().isoformat() if not df.empty else None,
-                        'end': df.index.max().isoformat() if not df.empty else None
-                    },
-                    'latest_price': df['close'].iloc[-1] if not df.empty else None,
-                    'last_update': datetime.fromtimestamp(
-                        self._last_update.get(symbol, 0)
-                    ).isoformat(),
-                    'has_traditional_subscription': symbol in self._subscriptions,
-                    'mutate_subscription': symbol in self._observables,
-                    'subscription_status': self._subscription_status.get(symbol, {}).get('status', 'unknown')
-                }
+                if df.empty:
+                    results[symbol] = 0
+                    continue
 
-        return summary
+                # Filter out old data
+                initial_rows = len(df)
+                df = df[df.index >= cutoff_time]
+                removed_rows = initial_rows - len(df)
+                self._data[symbol] = df
+                results[symbol] = removed_rows
+
+                if removed_rows > 0:
+                    self.logger.info(f"Cleaned up {removed_rows} old rows for {symbol}")
+
+        return results
+
+    async def grab_historical_data_multiple(
+        self,
+        symbol: str,
+        granularities: List[int],
+        count: int = 1000,
+        end_time: Optional[datetime] = None
+    ) -> Dict[int, bool]:
+        """
+        Fetches historical candlestick data for a symbol across multiple granularities.
+
+        Args:
+            symbol: Trading symbol
+            granularities: List of timeframes in seconds (e.g., [60, 300, 3600])
+            count: Number of candles to fetch per granularity
+            end_time: End time for historical data (None for latest)
+
+        Returns:
+            Dictionary of granularity -> success status
+        """
+        results = {}
+        for granularity in granularities:
+            success = await self.grab_historical_data(symbol, granularity, count, end_time)
+            results[granularity] = success
+            self.logger.info(f"Historical data fetch for {symbol} at {granularity}s: {'success' if success else 'failed'}")
+        return results
+
+    async def restart_failed_subscriptions(self, max_age_seconds: int = 60) -> Dict[str, Dict[str, Any]]:
+        """
+        Attempts to restart subscriptions for symbols with failed or stale data.
+
+        Args:
+            max_age_seconds: Maximum age of data in seconds to consider stale
+
+        Returns:
+            Dictionary of symbol -> restart status information
+        """
+        is_healthy, status = self.is_healthy(max_age_seconds=max_age_seconds)
+        results = {}
+
+        if is_healthy:
+            self.logger.info("All subscriptions are healthy, no restarts needed")
+            return results
+
+        # Identify symbols needing restart
+        symbols_to_restart = status['stale_symbols'] + [
+            s for s, info in status['symbols'].items()
+            if info['has_subscription'] and info['status'] in ['failed', 'error']
+        ]
+
+        if not symbols_to_restart:
+            self.logger.info("No subscriptions need restarting")
+            return results
+
+        self.logger.info(f"Attempting to restart subscriptions for: {symbols_to_restart}")
+
+        # Stop existing subscriptions for these symbols
+        for symbol in symbols_to_restart:
+            if symbol in self._subscriptions:
+                unsubscribe_request = {'forget': self._subscriptions[symbol]}
+                await self._make_api_request(unsubscribe_request)
+                del self._subscriptions[symbol]
+                self.logger.info(f"Stopped existing subscription for {symbol}")
+
+            if symbol in self._observables:
+                try:
+                    observable = self._observables[symbol]
+                    if hasattr(observable, 'dispose'):
+                        observable.dispose()
+                    elif hasattr(observable, 'unsubscribe'):
+                        observable.unsubscribe()
+                    del self._observables[symbol]
+                    self.logger.info(f"Disposed Observable for {symbol}")
+                except Exception as e:
+                    self.logger.error(f"Failed to dispose Observable for {symbol}: {e}")
+
+        # Start new subscriptions
+        results = await self.start_subscriptions(symbols_to_restart, fetch_historical=True)
+        return results

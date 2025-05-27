@@ -43,20 +43,20 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
         # Initialize Config
         logger.debug("Initializing Config...")
         config = Config()
-        if not config.SYMBOLS:
-            raise ValueError("No symbols defined in config.SYMBOLS")
+        if not config.symbols:
+            raise ValueError("No symbols defined in config.symbols")
 
         # Validate symbols
-        invalid_symbols = [s for s in config.SYMBOLS if not s.startswith('frx')]
+        invalid_symbols = [s for s in config.symbols if not s.startswith('frx')]
         if invalid_symbols:
-            raise ValueError(f"Invalid symbols in config.SYMBOLS: {invalid_symbols}")
+            raise ValueError(f"Invalid symbols in config.symbols: {invalid_symbols}")
 
-        historical_data = {symbol: {"candles": []} for symbol in config.SYMBOLS}
-        logger.info("Initialized config with symbols: %s, APP_ID: %s", config.SYMBOLS, config.APP_ID)
+        historical_data = {symbol: {"candles": []} for symbol in config.symbols}
+        logger.info("Initialized config with symbols: %s, app_id: %s", config.symbols, config.app_id)
 
         # Initialize DerivAPI
-        logger.debug("Initializing DerivAPI with APP_ID: %s", config.APP_ID)
-        api = DerivAPI(app_id=config.APP_ID)
+        logger.debug("Initializing DerivAPI with app_id: %s", config.app_id)
+        api = DerivAPI(app_id=config.app_id)
 
         # Retry ping with exponential backoff
         @tenacity.retry(
@@ -94,9 +94,9 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
             )
         )
         async def start_subscriptions_with_retry():
-            return await data_manager.start_subscriptions(config.SYMBOLS, fetch_historical=True)
+            return await data_manager.start_subscriptions(config.symbols, fetch_historical=True)
 
-        logger.info("Starting data subscriptions for symbols: %s", config.SYMBOLS)
+        logger.info("Starting data subscriptions for symbols: %s", config.symbols)
         try:
             subscription_results = await start_subscriptions_with_retry()
         except Exception as e:
@@ -128,7 +128,7 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
             raise RuntimeError("DataManager initialization failed")
 
         # Validate data for each symbol
-        for symbol in config.SYMBOLS:
+        for symbol in config.symbols:
             df = data_manager.get_snapshot(symbol)
             if df is None or df.empty:
                 if subscription_results[symbol].get('skipped'):
@@ -179,8 +179,8 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
         end_time = datetime.now(tz=timezone.utc)
         start_time = end_time - timedelta(days=config.HISTORICAL_DAYS)
 
-        logger.info("Fetching historical prices for %s...", config.SYMBOLS)
-        for symbol in config.SYMBOLS:
+        logger.info("Fetching historical prices for %s...", config.symbols)
+        for symbol in config.symbols:
             if subscription_results[symbol].get('skipped'):
                 logger.info(f"Skipping historical data fetch for {symbol} (market closed)")
                 continue
@@ -272,7 +272,7 @@ async def monitor_data_health(data_manager: DataManager):
         if not is_healthy:
             logger.warning("DataManager unhealthy, attempting to restart subscriptions: %s", status)
             await data_manager.stop_subscriptions()
-            await data_manager.start_subscriptions(data_manager.config.SYMBOLS)
+            await data_manager.start_subscriptions(data_manager.config.symbols)
         await asyncio.sleep(60)
 
 async def run_blocking_tasks(bot: ForexBot, config: Config):
