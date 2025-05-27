@@ -161,7 +161,7 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
         logger.debug("Authorizing API with token...")
         try:
             auth_response = await asyncio.wait_for(
-                api.authorize({"authorize": config.DERIV_API_TOKEN}), timeout=15
+                api.authorize({"authorize": config.deriv_api_token}), timeout=15
             )
             if not auth_response.get("authorize", {}).get("loginid"):
                 raise ConnectionError(f"Authorization failed: {auth_response}")
@@ -177,7 +177,7 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
         logger.debug("Calculating historical data timestamps...")
         timestamp_utils = TimestampUtils()
         end_time = datetime.now(tz=timezone.utc)
-        start_time = end_time - timedelta(days=config.HISTORICAL_DAYS)
+        start_time = end_time - timedelta(days=config.historical_days)
 
         logger.info("Fetching historical prices for %s...", config.symbols)
         for symbol in config.symbols:
@@ -252,8 +252,8 @@ async def event_loop_watchdog(config: Config, data_manager: DataManager):
     logger.info("Watchdog started in process %d", os.getpid())
     while True:
         start_time = time.monotonic()
-        await asyncio.sleep(config.WATCHDOG_INTERVAL)
-        delay = time.monotonic() - start_time - config.WATCHDOG_INTERVAL
+        await asyncio.sleep(config.watchdog_interval)
+        delay = time.monotonic() - start_time - config.watchdog_interval
         if delay > config.STARVATION_THRESHOLD:
             logger.warning("Event loop starvation detected! Delay: %.2fs", delay)
         current_tasks = [

@@ -75,9 +75,9 @@ class Backtester:
         self.strategy_manager = strategy_manager
         self.logger = logger or logging.getLogger(__name__)
         # Initialize stratestic strategies
-        self.mov_avg = MovingAverageCrossover(sma_size_short=50, sma_size_long=200, moving_average_type='sma')
+        self.mov_avg = MovingAverageCrossover(sma_s=50, sma_l=200, moving_av='sma')
         self.momentum = Momentum(window=100)
-        self.boll_bands = BollingerBands(period=20, std_dev=2)
+        self.boll_bands = BollingerBands(ma=20, sd=2)
 
     async def fetch_historical_data(self, symbol: str) -> Tuple[str, Optional[pd.DataFrame], Optional[pd.DataFrame]]:
         """

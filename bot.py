@@ -52,7 +52,7 @@ class ForexBot:
         self.trading_account = "DEMO123"
         self.timestamp_utils = TimestampUtils()
         self.start_date = self.timestamp_utils.from_seconds(
-            self.timestamp_utils.to_seconds(datetime.now(tz=UTC)) - config.HISTORICAL_DAYS * 86400
+            self.timestamp_utils.to_seconds(datetime.now(tz=UTC)) - config.historical_days * 86400
         )
         self.end_date = datetime.now(tz=UTC)
         self.logger.debug("ForexBot initialization completed")
