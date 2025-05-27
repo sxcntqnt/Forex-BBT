@@ -1,4 +1,5 @@
 import os, time, sys, logging
+import pandas as pd
 from configparser import ConfigParser
 from pathlib import Path
 from typing import Any
@@ -50,8 +51,10 @@ class Config:
         self.trailing_stop_pips: int = self.config['Settings'].getint('TRAILING_STOP_PIPS', 15)
         self.historical_days: int = self.config['Settings'].getint('HISTORICAL_DAYS', 30)
         self.max_data_points: int = self.config['Settings'].getint('MAX_DATA_POINTS', 5000)
-        self.backtest_start_date: str = self.config['Settings'].get('BACKTEST_START_DATE', '2023-01-01')
-        self.backtest_end_date: str = self.config['Settings'].get('BACKTEST_END_DATE', '2023-06-30')
+        self.backtest_start_date = pd.to_datetime(self.config['Settings'].get('BACKTEST_START_DATE', '2023-01-01'), utc=True)
+        self.backtest_end_date = pd.to_datetime(self.config['Settings'].get('BACKTEST_END_DATE', '2023-06-30'),utc=True)
+
+
 
         # Set attributes from Runtime section
         self.max_runtime: int = self.config['Runtime'].getint('MAX_RUNTIME', 3600)

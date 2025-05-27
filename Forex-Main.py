@@ -16,6 +16,7 @@ from deriv_api import DerivAPI
 from bot import ForexBot
 from utils import TimestampUtils
 from strategy import StrategyManager
+from portfolio_manager import PortfolioManager
 from web_interface import start_web_interface
 
 # Configure logging with process ID
@@ -84,7 +85,7 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
         logger.debug("Creating DataManager...")
         data_manager = DataManager(config=config, api=api, logger=logger)
 
-        # Start subscriptions with retries
+        # Start subscriptions with retries (no historical fetch)
         @tenacity.retry(
             stop=tenacity.stop_after_attempt(3),
             wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
@@ -94,7 +95,7 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
             )
         )
         async def start_subscriptions_with_retry():
-            return await data_manager.start_subscriptions(config.symbols, fetch_historical=True)
+            return await data_manager.start_subscriptions(config.symbols, fetch_historical=False)
 
         logger.info("Starting data subscriptions for symbols: %s", config.symbols)
         try:
@@ -103,7 +104,7 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
             logger.error(f"Subscription retries failed: {type(e).__name__}: {str(e)}")
             raise RuntimeError("Failed to start subscriptions after retries")
 
-        # Check if at least one symbol subscribed successfully
+        # Check subscription results
         successful_subscriptions = sum(1 for status in subscription_results.values() if status['success'])
         if successful_subscriptions == 0:
             logger.error(f"No successful subscriptions: {subscription_results}")
@@ -117,8 +118,79 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
             else:
                 logger.warning(f"Subscription failed for {symbol}: {status['error']}")
 
-        # Wait for data to populate
-        await asyncio.sleep(5)  # Adjust based on API response time
+        # Wait for initial data
+        await asyncio.sleep(10)
+
+        # Fetch historical data with retries
+        logger.debug("Calculating historical data timestamps...")
+        timestamp_utils = TimestampUtils()
+        end_time = datetime.now(tz=timezone.utc)
+        start_time = end_time - timedelta(days=config.historical_days)
+
+        logger.info("Fetching historical prices for %s...", config.symbols)
+        @tenacity.retry(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
+            retry=tenacity.retry_if_result(lambda success: not success),
+            before_sleep=lambda retry_state: logger.error(
+                f"Retrying historical data fetch for {symbol}: attempt {retry_state.attempt_number}"
+            )
+        )
+        async def fetch_historical_with_retry(symbol, start_time, end_time):
+            return await data_manager.grab_historical_data(
+                symbol=symbol,
+                granularity=60,
+                start_time=start_time,
+                end_time=end_time
+            )
+
+        for symbol in config.symbols:
+            if subscription_results[symbol].get('skipped'):
+                logger.info(f"Skipping historical data fetch for {symbol} (market closed)")
+                continue
+            try:
+                success = await fetch_historical_with_retry(symbol, start_time, end_time)
+                if success:
+                    df = data_manager.get_snapshot(symbol)
+                    if df is not None and not df.empty:
+                        first_candle = {
+                            "epoch": df.index.min().timestamp(),
+                            "datetime": df.index.min().isoformat(),
+                            "close": df['close'].iloc[0]
+                        }
+                        historical_data[symbol]["candles"].append(first_candle)
+                        logger.info(
+                            "First candle datetime for %s: %s",
+                            symbol,
+                            first_candle["datetime"],
+                        )
+                    else:
+                        logger.info("No historical data for %s", symbol)
+                else:
+                    logger.warning("Failed to fetch historical data for %s", symbol)
+            except Exception as e:
+                logger.error("Error fetching historical data for %s: %s", symbol, str(e))
+
+        # Validate data
+        logger.debug("Validating data...")
+        valid_symbols = 0
+        for symbol in config.symbols:
+            df = data_manager.get_snapshot(symbol)
+            if df is None or df.empty:
+                if subscription_results[symbol].get('skipped'):
+                    logger.info(f"No data for {symbol} (market closed, skipped)")
+                    continue
+                logger.warning(f"No data for {symbol}, but market is open")
+                continue
+            if not isinstance(df.index, pd.DatetimeIndex):
+                logger.error(f"Invalid index for {symbol}: {df.index}")
+                raise RuntimeError(f"Invalid index for {symbol}")
+            logger.debug(f"Data validated for {symbol}: shape={df.shape}")
+            valid_symbols += 1
+
+        if valid_symbols == 0:
+            logger.error("No symbols have valid data. Cannot proceed.")
+            raise RuntimeError("No valid data for any symbols")
 
         # Check DataManager health
         logger.debug("Checking DataManager health...")
@@ -127,24 +199,22 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
             logger.error(f"DataManager not healthy: {status}")
             raise RuntimeError("DataManager initialization failed")
 
-        # Validate data for each symbol
-        for symbol in config.symbols:
-            df = data_manager.get_snapshot(symbol)
-            if df is None or df.empty:
-                if subscription_results[symbol].get('skipped'):
-                    logger.info(f"No data for {symbol} (market closed, skipped)")
-                    continue
-                logger.error(f"No data for {symbol}")
-                raise RuntimeError(f"Data validation failed for {symbol}")
-            if not isinstance(df.index, pd.DatetimeIndex):
-                logger.error(f"Invalid index for {symbol}: {df.index}")
-                raise RuntimeError(f"Invalid index for {symbol}")
-            logger.debug(f"Data validated for {symbol}: shape={df.shape}")
+        # Initialize PortfolioManager
+        logger.debug("Creating PortfolioManager...")
+        portfolio_manager = PortfolioManager(
+            config=config,
+            data_manager=data_manager,
+            api=api,
+            logger=logger
+        )
 
         # Initialize StrategyManager
         logger.debug("Creating StrategyManager...")
         strategy_manager = StrategyManager(
-            data_manager=data_manager, api=api, logger=logger
+            data_manager=data_manager,
+            api=api,
+            logger=logger,
+            portfolio_manager=portfolio_manager
         )
 
         # Initialize ForexBot
@@ -173,45 +243,6 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
             logger.error(f"Authorization failed: {type(e).__name__}: {str(e)}")
             raise
 
-        # Fetch additional historical data if needed
-        logger.debug("Calculating historical data timestamps...")
-        timestamp_utils = TimestampUtils()
-        end_time = datetime.now(tz=timezone.utc)
-        start_time = end_time - timedelta(days=config.historical_days)
-
-        logger.info("Fetching historical prices for %s...", config.symbols)
-        for symbol in config.symbols:
-            if subscription_results[symbol].get('skipped'):
-                logger.info(f"Skipping historical data fetch for {symbol} (market closed)")
-                continue
-            try:
-                success = await data_manager.grab_historical_data(
-                    symbol=symbol,
-                    granularity=60,
-                    count=1000,
-                    end_time=end_time
-                )
-                if success:
-                    df = data_manager.get_snapshot(symbol)
-                    if df is not None and not df.empty:
-                        first_candle = {
-                            "epoch": df.index.min().timestamp(),
-                            "datetime": df.index.min().isoformat(),
-                            "close": df['close'].iloc[0]
-                        }
-                        historical_data[symbol]["candles"].append(first_candle)
-                        logger.info(
-                            "First candle datetime for %s: %s",
-                            symbol,
-                            first_candle["datetime"],
-                        )
-                    else:
-                        logger.info("No additional historical data for %s", symbol)
-                else:
-                    logger.warning("Failed to fetch additional historical data for %s", symbol)
-            except Exception as e:
-                logger.error("Error fetching historical data for %s: %s", symbol, str(e))
-
         logger.info("DataManager initialization completed.")
 
         # Start background tasks
@@ -223,7 +254,7 @@ async def main() -> Tuple[Dict[str, Dict], Optional["ForexBot"], Optional[DerivA
             asyncio.create_task(event_loop_watchdog(config, data_manager), name="watchdog"),
             asyncio.create_task(monitor_data_health(data_manager), name="data_health"),
         ]
-        await asyncio.sleep(2)  # Allow tasks to start
+        await asyncio.sleep(2)
 
         logger.info("All tasks scheduled")
         return historical_data, bot, api
@@ -254,7 +285,7 @@ async def event_loop_watchdog(config: Config, data_manager: DataManager):
         start_time = time.monotonic()
         await asyncio.sleep(config.watchdog_interval)
         delay = time.monotonic() - start_time - config.watchdog_interval
-        if delay > config.STARVATION_THRESHOLD:
+        if delay > config.starvation_threshold:
             logger.warning("Event loop starvation detected! Delay: %.2fs", delay)
         current_tasks = [
             t for t in asyncio.all_tasks() if t is not asyncio.current_task()
@@ -265,7 +296,7 @@ async def event_loop_watchdog(config: Config, data_manager: DataManager):
             logger.warning("DataManager unhealthy in watchdog: %s", status)
 
 async def monitor_data_health(data_manager: DataManager):
-    """Monitors DataManager health."""
+    """Monitors DataManager health and retries closed-market symbols."""
     logger.info("Data health monitor started")
     while True:
         is_healthy, status = data_manager.is_healthy(freshness_threshold=30)
@@ -273,14 +304,22 @@ async def monitor_data_health(data_manager: DataManager):
             logger.warning("DataManager unhealthy, attempting to restart subscriptions: %s", status)
             await data_manager.stop_subscriptions()
             await data_manager.start_subscriptions(data_manager.config.symbols)
-        await asyncio.sleep(60)
+        else:
+            # Retry closed-market symbols
+            closed_symbols = [
+                s for s, info in status['symbols'].items()
+                if info.get('is_skipped')
+            ]
+            if closed_symbols:
+                logger.info(f"Retrying subscriptions for closed markets: {closed_symbols}")
+                await data_manager.start_subscriptions(closed_symbols)
+        await asyncio.sleep(3600)  # Check hourly
 
 async def run_blocking_tasks(bot: ForexBot, config: Config):
     """Run CPU-intensive tasks in executor."""
     logger.info("Blocking tasks started in process %d", os.getpid())
     while True:
         try:
-            # Placeholder for CPU-intensive tasks (e.g., ML model updates)
             await asyncio.sleep(60)
         except Exception as e:
             logger.error("Blocking task error: %s", str(e))
@@ -317,7 +356,7 @@ async def run_bot():
 
         logger.info("Bot running in background. Press Ctrl+C to stop.")
         try:
-            await asyncio.Event().wait()  # Run indefinitely until interrupted
+            await asyncio.Event().wait()
         except KeyboardInterrupt:
             logger.info("Received interrupt, stopping...")
             await stop_bot(bot, api)

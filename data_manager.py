@@ -2,7 +2,7 @@ import asyncio
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple, Union
 import pandas as pd
 import numpy as np
@@ -380,11 +380,13 @@ class DataManager:
         wait=wait_exponential(multiplier=1, min=4, max=10),
         retry=retry_if_exception_type((ConnectionClosed, WebSocketException, asyncio.TimeoutError))
     )
+
     async def grab_historical_data(
         self,
         symbol: str,
         granularity: int = 60,  # seconds
         count: int = 1000,
+        start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None
     ) -> bool:
         """
@@ -393,51 +395,98 @@ class DataManager:
         Args:
             symbol: Trading symbol
             granularity: Timeframe in seconds (60=1min, 3600=1hour, etc.)
-            count: Number of candles to fetch
+            count: Number of candles to fetch (used only if start_time is None)
+            start_time: Start time for historical data (None to use config.historical_days)
             end_time: End time for historical data (None for latest)
 
         Returns:
             True if successful, False otherwise
         """
         try:
-            self.logger.info(f"Fetching historical data for {symbol} (granularity: {granularity}s, count: {count})")
+            self.logger.info(f"Fetching historical data for {symbol} (granularity: {granularity}s)")
 
-            # Prepare request parameters
-            request = {
-                'ticks_history': symbol,
-                'granularity': granularity,
-                'count': count,
-                'style': 'candles'
-            }
+            # Set default end_time if not provided
+            if end_time is None:
+                end_time = datetime.now(tz=timezone.utc)
 
-            if end_time:
-                request['end'] = int(end_time.timestamp())
-            else:
-                request['end'] = 'latest'
+            # Set start_time if not provided
+            if start_time is None:
+                start_time = end_time - timedelta(days=self.config.historical_days)
 
-            # Make API request
-            response = await self._make_api_request(request)
+            # Ensure times are timezone-aware
+            if start_time.tzinfo is None:
+                start_time = start_time.replace(tzinfo=timezone.utc)
+            if end_time.tzinfo is None:
+                end_time = end_time.replace(tzinfo=timezone.utc)
 
-            if response is None:
-                self.logger.error(f"Failed to get response for {symbol}")
-                return False
+            # Calculate required candles
+            total_seconds = (end_time - start_time).total_seconds()
+            required_candles = int(total_seconds // granularity) + 1
+            max_candles_per_request = 5000  # Deriv API limit
 
-            if response.get('error'):
-                error_msg = response['error'].get('message', str(response['error']))
-                self.logger.error(f"API error for {symbol}: {error_msg}")
-                return False
+            # Initialize DataFrame to store all candles
+            all_candles = []
 
-            # Extract candles data
-            candles = response.get('candles', [])
-            if not candles:
-                self.logger.warning(f"No candles data received for {symbol}")
+            # Paginate if required_candles exceeds max_candles_per_request
+            current_end_time = end_time
+            candles_fetched = 0
+
+            while candles_fetched < required_candles:
+                candles_to_fetch = min(max_candles_per_request, required_candles - candles_fetched)
+                self.logger.debug(f"Fetching {candles_to_fetch} candles for {symbol}, from {start_time} to {current_end_time}")
+
+                # Prepare request parameters
+                request = {
+                    'ticks_history': symbol,
+                    'granularity': granularity,
+                    'style': 'candles',
+                    'start': int(start_time.timestamp()),
+                    'end': int(current_end_time.timestamp())
+                }
+
+                # Make API request
+                response = await self._make_api_request(request)
+
+                if response is None:
+                    self.logger.error(f"Failed to get response for {symbol}")
+                    return False
+
+                if response.get('error'):
+                    error_msg = response['error'].get('message', str(response['error']))
+                    self.logger.error(f"API error for {symbol}: {error_msg}")
+                    return False
+
+                # Extract candles data
+                candles = response.get('candles', [])
+                if not candles:
+                    self.logger.warning(f"No candles data received for {symbol}")
+                    break
+
+                all_candles.extend(candles)
+                candles_fetched += len(candles)
+
+                # Update end_time for the next request
+                if candles:
+                    earliest_epoch = candles[0]['epoch']
+                    current_end_time = datetime.fromtimestamp(earliest_epoch, tz=timezone.utc) - timedelta(seconds=granularity)
+                    start_time = current_end_time - timedelta(seconds=candles_to_fetch * granularity)
+                else:
+                    break
+
+                # Avoid infinite loop
+                if len(candles) < candles_to_fetch:
+                    self.logger.info(f"Reached end of available data for {symbol}")
+                    break
+
+            if not all_candles:
+                self.logger.warning(f"No historical data fetched for {symbol}")
                 return False
 
             # Convert to DataFrame
             df_data = []
-            for candle in candles:
+            for candle in all_candles:
                 df_data.append({
-                    'timestamp': pd.to_datetime(candle['epoch'], unit='s'),
+                    'timestamp': pd.to_datetime(candle['epoch'], unit='s', utc=True),
                     'open': float(candle['open']),
                     'high': float(candle['high']),
                     'low': float(candle['low']),
@@ -451,7 +500,6 @@ class DataManager:
             # Store data thread-safely
             with self._data_lock:
                 if symbol in self._data:
-                    # Merge with existing data, avoiding duplicates
                     existing_df = self._data[symbol]
                     combined_df = pd.concat([existing_df, df])
                     combined_df = combined_df[~combined_df.index.duplicated(keep='last')]
@@ -470,6 +518,9 @@ class DataManager:
             self.logger.error(f"Failed to fetch historical data for {symbol}: {e}")
             return False
 
+
+
+
     async def tick_callback(self, symbol: str, tick_data: Dict[str, Any]) -> None:
         """
         Processes incoming tick data and updates the DataFrame.
@@ -480,7 +531,7 @@ class DataManager:
         """
         try:
             # Extract relevant information from tick
-            timestamp = pd.to_datetime(tick_data.get('epoch', time.time()), unit='s')
+            timestamp = pd.to_datetime(tick_data.get('epoch', time.time()), unit='s', utc=True)
             price = float(tick_data.get('quote', tick_data.get('bid', 0)))
 
             if price <= 0:
@@ -854,13 +905,17 @@ class DataManager:
             Dictionary of symbol -> number of removed rows
         """
         results = {}
-        cutoff_time = pd.Timestamp.now() - pd.Timedelta(days=max_age_days)
+        cutoff_time = pd.Timestamp.now(tz=timezone.utc) - pd.Timedelta(days=max_age_days)
 
         with self._data_lock:
             for symbol, df in self._data.items():
                 if df.empty:
                     results[symbol] = 0
                     continue
+
+                # Ensure index is UTC-aware
+                if df.index.tz is None:
+                    df.index = df.index.tz_localize('UTC')
 
                 # Filter out old data
                 initial_rows = len(df)
@@ -887,15 +942,18 @@ class DataManager:
         Args:
             symbol: Trading symbol
             granularities: List of timeframes in seconds (e.g., [60, 300, 3600])
-            count: Number of candles to fetch per granularity
+            count: Number of candles to fetch per granularity (overridden by date range)
             end_time: End time for historical data (None for latest)
 
         Returns:
             Dictionary of granularity -> success status
         """
         results = {}
+        if end_time is None:
+            end_time = datetime.now(tz=timezone.utc)
+
         for granularity in granularities:
-            success = await self.grab_historical_data(symbol, granularity, count, end_time)
+            success = await self.grab_historical_data(symbol, granularity=granularity, count=count, end_time=end_time)
             results[granularity] = success
             self.logger.info(f"Historical data fetch for {symbol} at {granularity}s: {'success' if success else 'failed'}")
         return results
@@ -920,7 +978,7 @@ class DataManager:
         # Identify symbols needing restart
         symbols_to_restart = status['stale_symbols'] + [
             s for s, info in status['symbols'].items()
-            if info['has_subscription'] and info['status'] in ['failed', 'error']
+            if info.get('has_subscription') and self._subscription_status.get(s, {}).get('status') in ['failed', 'error']
         ]
 
         if not symbols_to_restart:

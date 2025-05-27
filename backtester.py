@@ -1,5 +1,5 @@
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import asyncio
 from typing import Optional, Tuple, Dict
@@ -36,7 +36,7 @@ class BacktestStrategy(Strategy):
         # Store data in DataManager
         with self.data_manager._data_lock:
             self.data_manager._data[self.symbol] = df
-            self.data_manager._last_update[self.symbol] = datetime.now().timestamp()
+            self.data_manager._last_update[self.symbol] = datetime.now(tz=timezone.utc).timestamp()
 
     def init(self):
         self.position_size = self.config.initial_capital * self.config.risk_percentage
@@ -81,7 +81,7 @@ class Backtester:
 
     async def fetch_historical_data(self, symbol: str) -> Tuple[str, Optional[pd.DataFrame], Optional[pd.DataFrame]]:
         """
-        Fetches historical data for a symbol using DataManager.
+        Retrieves historical data for a symbol from DataManager, fetching only if necessary.
 
         Args:
             symbol: Trading symbol
@@ -90,32 +90,56 @@ class Backtester:
             Tuple of (symbol, stratestic DataFrame, backtesting DataFrame)
         """
         try:
-            start_date = pd.to_datetime(self.config.start_timestamp)
-            end_date = pd.to_datetime(self.config.end_timestamp)
+            # Check subscription status
+            status = await self.data_manager.get_subscription_status(symbol)
+            if status.get(symbol, {}).get('status') == 'skipped':
+                self.logger.info(f"Skipping {symbol} backtest (market closed)")
+                return symbol, None, None
+
+            # Define date range for backtesting (align with trading data)
+            start_date = pd.to_datetime(self.config.backtest_start_date, utc=True)
+            end_date = pd.to_datetime(self.config.backtest_end_date, utc=True)
             granularity = 60  # 1-minute candles
-            count = 5000  # Adjust based on API limits
 
-            # Use DataManager to fetch historical data
-            success = await self.data_manager.grab_historical_data(
-                symbol=symbol,
-                granularity=granularity,
-                count=count,
-                end_time=end_date
-            )
-            if not success:
-                self.logger.warning(f"Failed to fetch historical data for {symbol}")
-                return symbol, None, None
-
-            # Retrieve data from DataManager
+            # Check if DataManager has sufficient data
             df = self.data_manager.get_snapshot(symbol)
-            if df is None or df.empty:
-                self.logger.warning(f"No data available for {symbol} after fetch")
-                return symbol, None, None
+            data_sufficient = False
+
+            if df is not None and not df.empty:
+                # Ensure index is timezone-aware
+                if df.index.tz is None:
+                    df.index = df.index.tz_localize('UTC')
+                data_start = df.index.min()
+                data_end = df.index.max()
+                if (data_start <= start_date) and (data_end >= end_date):
+                    data_sufficient = True
+                    self.logger.info(f"Using existing historical data for {symbol} ({len(df)} candles, {data_start} to {data_end})")
+                else:
+                    self.logger.info(f"Existing data for {symbol} insufficient (covers {data_start} to {data_end}, need {start_date} to {end_date})")
+
+            # Fetch data if necessary
+            if not data_sufficient:
+                self.logger.info(f"Fetching historical data for {symbol}")
+                success = await self.data_manager.grab_historical_data(
+                    symbol=symbol,
+                    granularity=granularity,
+                    start_time=start_date,
+                    end_time=end_date
+                )
+                if not success:
+                    self.logger.warning(f"Failed to fetch historical data for {symbol}")
+                    return symbol, None, None
+
+                # Retrieve updated data
+                df = self.data_manager.get_snapshot(symbol)
+                if df is None or df.empty:
+                    self.logger.warning(f"No data available for {symbol} after fetch")
+                    return symbol, None, None
 
             # Filter by date range
             df = df[(df.index >= start_date) & (df.index <= end_date)]
             if df.empty:
-                self.logger.warning(f"No data within date range for {symbol}")
+                self.logger.warning(f"No data within date range {start_date} to {end_date} for {symbol}")
                 return symbol, None, None
 
             # Create DataFrames for stratestic and backtesting
@@ -130,11 +154,11 @@ class Backtester:
             if 'volume' not in df_backtesting.columns:
                 df_backtesting['Volume'] = 0.0
 
-            self.logger.info(f"Fetched {len(df)} candles for {symbol}")
+            self.logger.info(f"Prepared {len(df)} candles for {symbol} backtesting")
             return symbol, df_stratestic, df_backtesting
 
         except Exception as e:
-            self.logger.error(f"Failed to fetch historical data for {symbol}: {e}", exc_info=True)
+            self.logger.error(f"Error preparing historical data for {symbol}: {e}", exc_info=True)
             return symbol, None, None
 
     async def run(self) -> Dict[str, Dict[str, Dict]]:
@@ -145,6 +169,7 @@ class Backtester:
             Dictionary of symbol -> backtest results
         """
         results = {}
+        valid_symbols = 0
         for symbol in self.config.symbols:
             self.logger.info(f"Starting backtest for {symbol}")
             symbol, df_stratestic, df_backtesting = await self.fetch_historical_data(symbol)
@@ -152,6 +177,7 @@ class Backtester:
                 self.logger.warning(f"Skipping backtest for {symbol} due to insufficient data")
                 continue
 
+            valid_symbols += 1
             results[symbol] = {'stratestic': {}, 'backtest': {}}
 
             # Initialize StrategyCombiner for this symbol
@@ -263,5 +289,10 @@ class Backtester:
             except Exception as e:
                 self.logger.error(f"Backtesting backtest failed for {symbol}: {e}")
                 results[symbol]['backtest'] = {}
+
+        if valid_symbols == 0:
+            self.logger.error("No symbols had valid data for backtesting")
+        else:
+            self.logger.info(f"Backtesting completed for {valid_symbols}/{len(self.config.symbols)} symbols")
 
         return results
